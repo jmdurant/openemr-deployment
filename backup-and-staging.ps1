@@ -510,12 +510,20 @@ function Copy-OpenEMREnvFile {
         [string]$Environment
     )
     
-    # Check for .env.example in ciips/docker directory
-    $envExamplePath = "$SourceDir\ciips\docker\.env.example"
+    # Determine the appropriate .env.example location based on project type
+    $envExamplePath = if ($Project -eq "official") {
+        # For official OpenEMR, look in the root directory
+        "$SourceDir\.env.example"
+    } else {
+        # For custom OpenEMR, look in the ciips/docker directory
+        "$SourceDir\ciips\docker\.env.example"
+    }
     $envTargetPath = "$TargetDir\.env"
     
+    Write-Host "Looking for OpenEMR .env.example file at: $envExamplePath" -ForegroundColor Yellow
+    
     if (Test-Path $envExamplePath) {
-        Write-Host "Found OpenEMR .env.example file at: $envExamplePath" -ForegroundColor Yellow
+        Write-Host "Found OpenEMR .env.example file at: $envExamplePath" -ForegroundColor Green
         
         try {
             # Read the .env.example file content
@@ -553,9 +561,9 @@ function Copy-OpenEMREnvFile {
             
             # Add domain setting if not present
             if (-not ($envContent -match "DOMAIN=")) {
-                $envContent += "`nDOMAIN=$Environment.localhost`n"
+                $envContent += "`nDOMAIN=$($envConfig.Domains.openemr)`n"
             } else {
-                $envContent = $envContent -replace "DOMAIN=.*", "DOMAIN=$Environment.localhost"
+                $envContent = $envContent -replace "DOMAIN=.*", "DOMAIN=$($envConfig.Domains.openemr)"
             }
             
             # Uncomment and set NGINX_UID for dev environment and uncomment other settings
@@ -598,8 +606,53 @@ function Copy-OpenEMREnvFile {
         }
     }
     else {
-        Write-Host "OpenEMR .env.example file not found at: $envExamplePath" -ForegroundColor Yellow
-        return $false
+        # If .env.example was not found in the expected location, try alternative locations as fallback
+        $alternativePaths = @(
+            "$SourceDir\.env.example",
+            "$SourceDir\docker\.env.example",
+            "$SourceDir\ciips\docker\.env.example"
+        )
+        
+        # Remove the already-checked path from the alternatives
+        $alternativePaths = $alternativePaths | Where-Object { $_ -ne $envExamplePath }
+        
+        # Try each alternative path
+        foreach ($altPath in $alternativePaths) {
+            Write-Host "Trying alternative location: $altPath" -ForegroundColor Yellow
+            if (Test-Path $altPath) {
+                Write-Host "Found OpenEMR .env.example at alternative location: $altPath" -ForegroundColor Green
+                # Set the found path as the new envExamplePath and call the function again
+                $envExamplePath = $altPath
+                return (Copy-OpenEMREnvFile -SourceDir $SourceDir -TargetDir $TargetDir -Environment $Environment)
+            }
+        }
+        
+        Write-Host "OpenEMR .env.example file not found in any expected location. Creating a basic one..." -ForegroundColor Yellow
+        
+        # Create a basic .env file if .env.example doesn't exist (especially important for official project)
+        try {
+            $timestamp = Get-Date -Format "MM/dd/yyyy HH:mm:ss"
+            $envContent = @"
+# Environment file for $Project OpenEMR - $Environment
+# Generated: $timestamp
+
+COMPOSE_PROJECT_NAME=$Project-$Environment
+HTTP_PORT=$($envConfig.Config.containerPorts.openemr.http)
+HTTPS_PORT=$($envConfig.Config.containerPorts.openemr.https)
+DOMAIN=$($envConfig.Domains.openemr)
+FRONTEND_NETWORK=$($envConfig.FrontendNetwork)
+PROXY_NETWORK=$($envConfig.ProxyNetwork)
+"@
+            
+            # Write the content to the target file
+            Set-Content -Path $envTargetPath -Value $envContent
+            Write-Host "Created basic OpenEMR .env file at: $envTargetPath" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Error creating basic OpenEMR .env file: $_" -ForegroundColor Red
+            return $false
+        }
     }
 }
 
@@ -1356,6 +1409,17 @@ function Copy-OpenEMRFolder {
                 # Update the project name in the docker-compose file
                 if ($dockerComposeContent -notmatch "name:") {
                     $dockerComposeContent = $dockerComposeContent -replace "version: '3.1'", "version: '3.1'`nname: $($envConfig.ProjectName)"
+                }
+
+                # Add DOMAIN environment variable if not present
+                if ($dockerComposeContent -notmatch "DOMAIN:") {
+                    # Search for the environment section of the openemr service
+                    if ($dockerComposeContent -match "(\s+environment:\s*\n)(\s+[^\n]+\n)+") {
+                        $match = $Matches[0]
+                        $lastEnvVarLine = $match.TrimEnd()
+                        $newEnvSection = "$lastEnvVarLine`n      DOMAIN: $($envConfig.Domains.openemr)"
+                        $dockerComposeContent = $dockerComposeContent.Replace($match, $newEnvSection)
+                    }
                 }
 
                 # Save the updated content
