@@ -2082,6 +2082,12 @@ try {
     if ($RunSetup) {
         Write-Host "`nRunning setup script for $Environment environment..." -ForegroundColor Cyan
         
+        # Debug output
+        Write-Host "Debug: Environment = $Environment" -ForegroundColor Magenta
+        Write-Host "Debug: Project = $Project" -ForegroundColor Magenta
+        Write-Host "Debug: DevMode = $script:DevMode" -ForegroundColor Magenta
+        Write-Host "Debug: dirName from envConfig = $($envConfig.DirectoryName)" -ForegroundColor Magenta
+        
         # Construct the arguments for setup.ps1
         $setupArgs = @{
             Environment = $Environment
@@ -2097,8 +2103,16 @@ try {
         & "$PSScriptRoot\setup.ps1" @setupArgs
         
         Write-Host "`nSetup script completed for $Environment environment." -ForegroundColor Green
-            } else {
+    } else {
         Write-Host "For full customization, run setup.ps1 manually: .\setup.ps1 -Environment $Environment -Project $Project -DomainBase $DomainBase" -ForegroundColor Yellow
+    }
+    
+    # Update ChromeDriver for Selenium scripts
+    $updateChromeDriverScript = Join-Path $PSScriptRoot "update-chromedriver.ps1"
+    if (Test-Path $updateChromeDriverScript) {
+        Write-Host "`nUpdating ChromeDriver to match current Chrome version..." -ForegroundColor Cyan
+        & "$PSScriptRoot\update-chromedriver.ps1"
+        Write-Host "ChromeDriver update completed." -ForegroundColor Green
     }
     
     # Display final success messages

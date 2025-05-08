@@ -822,6 +822,17 @@ function Configure-SSLCertificates {
     }
 }
 
+# First, ensure ChromeDriver is up-to-date
+Write-Host "Checking ChromeDriver version and updating if necessary..." -ForegroundColor Cyan
+$updateChromeDriverScript = Join-Path $PSScriptRoot "update-chromedriver.ps1"
+if (Test-Path $updateChromeDriverScript) {
+    Write-Host "Running ChromeDriver update script: $updateChromeDriverScript" -ForegroundColor Cyan
+    & $updateChromeDriverScript -DownloadDirectory $seleniumPath -Force:$ForceReinstall
+} else {
+    Write-Host "ChromeDriver update script not found at: $updateChromeDriverScript" -ForegroundColor Yellow
+    Write-Host "Continuing with existing ChromeDriver (if available)" -ForegroundColor Yellow
+}
+
 # Main script execution
 try {
     # Check for ChromeDriver
