@@ -952,10 +952,60 @@ if ($Project -eq "official") {
         $httpPort = $envConfig.Config.containerPorts.openemr.http
         $httpsPort = $envConfig.Config.containerPorts.openemr.https
 
-        # Use regex to replace port mappings - handle both quoted and unquoted versions
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+ports:\s+.*?)(\s+- )("|)?80:80("|)?', "`$1`$2`$3$httpPort:80`$4"
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+- )("|)?80:80("|)?', "`$1`$2$httpPort:80`$3"
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+- )("|)?443:443("|)?', "`$1`$2$httpsPort:443`$3"
+        Write-Host "Replacing port mappings: 80 -> $httpPort, 443 -> $httpsPort" -ForegroundColor Yellow
+        
+        # Instead of complex regex, use a more reliable line-by-line approach
+        $lines = $dockerComposeContent -split "`n"
+        $inPorts = $false
+        $updatedLines = @()
+        
+        foreach ($line in $lines) {
+            # Check if we're entering the ports section
+            if ($line -match '^\s+ports:\s*$') {
+                $inPorts = $true
+                $updatedLines += $line
+                continue
+            }
+            
+            # If we're in the ports section, handle port replacements
+            if ($inPorts) {
+                if ($line -match '^\s+-\s+(\")?(80:80)(\")?\s*$') {
+                    # This is the HTTP port line - preserve quote style
+                    $hasQuotes = $matches[1] -ne $null -and $matches[1] -ne ""
+                    if ($hasQuotes) {
+                        $updatedLines += $line -replace '"80:80"', """$httpPort`:80"""
+                    } else {
+                        $updatedLines += $line -replace '80:80', "$httpPort`:80"
+                    }
+                    continue
+                }
+                elseif ($line -match '^\s+-\s+(\")?(443:443)(\")?\s*$') {
+                    # This is the HTTPS port line - preserve quote style
+                    $hasQuotes = $matches[1] -ne $null -and $matches[1] -ne ""
+                    if ($hasQuotes) {
+                        $updatedLines += $line -replace '"443:443"', """$httpsPort`:443"""
+                    } else {
+                        $updatedLines += $line -replace '443:443', "$httpsPort`:443"
+                    }
+                    continue
+                }
+                elseif ($line -match '^\s+-') {
+                    # Still in ports section but with a different port
+                    $updatedLines += $line
+                    continue
+                }
+                else {
+                    # No longer in ports section
+                    $inPorts = $false
+                }
+            }
+            
+            # Add the unchanged line
+            $updatedLines += $line
+        }
+        
+        # Join the lines back together
+        $dockerComposeContent = $updatedLines -join "`n"
 
         # Add project name to prevent conflicts
         $dockerComposeContent = "# Docker Compose for Official OpenEMR - $Environment`n`nversion: '3.1'`nname: $($envConfig.ProjectName)`n" + ($dockerComposeContent -replace "version: '3.1'", "")
