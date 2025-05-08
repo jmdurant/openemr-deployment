@@ -1,0 +1,108 @@
+version: '3'
+
+services:
+  # Frontend
+  web:
+    image: jitsi/web:latest
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${CONFIG}/web:/config:Z
+      - ${CONFIG}/web/letsencrypt:/etc/letsencrypt:Z
+      - ${CONFIG}/transcripts:/usr/share/jitsi-meet/transcripts:Z
+    environment:
+      - ENABLE_LETSENCRYPT=1
+      - LETSENCRYPT_DOMAIN=${DOMAIN}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+      - PUBLIC_URL=https://${DOMAIN}
+      - XMPP_DOMAIN=${XMPP_DOMAIN}
+      - XMPP_AUTH_DOMAIN=auth.${XMPP_DOMAIN}
+      - XMPP_BOSH_URL_BASE=http://xmpp.${XMPP_DOMAIN}:5280
+      - XMPP_GUEST_DOMAIN=guest.${XMPP_DOMAIN}
+      - XMPP_MUC_DOMAIN=muc.${XMPP_DOMAIN}
+      - XMPP_RECORDER_DOMAIN=recorder.${XMPP_DOMAIN}
+      - JICOFO_AUTH_USER=focus
+      - TZ=${TZ}
+    networks:
+      - ${FRONTEND_NETWORK}
+      - ${PROXY_NETWORK}
+    ports:
+      - "${HTTP_PORT}:80"
+      - "${HTTPS_PORT}:443"
+
+  # XMPP server
+  prosody:
+    image: jitsi/prosody:latest
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${CONFIG}/prosody/config:/config:Z
+      - ${CONFIG}/prosody/prosody-plugins-custom:/prosody-plugins-custom:Z
+    environment:
+      - ENABLE_AUTH=${ENABLE_AUTH:-0}
+      - ENABLE_GUESTS=${ENABLE_GUESTS:-1}
+      - XMPP_DOMAIN=${XMPP_DOMAIN}
+      - XMPP_AUTH_DOMAIN=auth.${XMPP_DOMAIN}
+      - XMPP_GUEST_DOMAIN=guest.${XMPP_DOMAIN}
+      - XMPP_MUC_DOMAIN=muc.${XMPP_DOMAIN}
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.${XMPP_DOMAIN}
+      - XMPP_RECORDER_DOMAIN=recorder.${XMPP_DOMAIN}
+      - JICOFO_COMPONENT_SECRET=${JICOFO_COMPONENT_SECRET}
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      - TZ=${TZ}
+    networks:
+      - ${PROXY_NETWORK}
+    ports:
+      - "${XMPP_PORT}:5222"
+
+  # Focus component
+  jicofo:
+    image: jitsi/jicofo:latest
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${CONFIG}/jicofo:/config:Z
+    environment:
+      - ENABLE_AUTH=${ENABLE_AUTH:-0}
+      - XMPP_DOMAIN=${XMPP_DOMAIN}
+      - XMPP_AUTH_DOMAIN=auth.${XMPP_DOMAIN}
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.${XMPP_DOMAIN}
+      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
+      - JICOFO_COMPONENT_SECRET=${JICOFO_COMPONENT_SECRET}
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=${JICOFO_AUTH_PASSWORD}
+      - TZ=${TZ}
+    depends_on:
+      - prosody
+    networks:
+      - ${PROXY_NETWORK}
+
+  # Video bridge
+  jvb:
+    image: jitsi/jvb:latest
+    restart: ${RESTART_POLICY:-unless-stopped}
+    volumes:
+      - ${CONFIG}/jvb:/config:Z
+    environment:
+      - DOCKER_HOST_ADDRESS=${DOCKER_HOST_ADDRESS}
+      - XMPP_AUTH_DOMAIN=auth.${XMPP_DOMAIN}
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.${XMPP_DOMAIN}
+      - XMPP_SERVER=xmpp.${XMPP_DOMAIN}
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=${JVB_AUTH_PASSWORD}
+      - JVB_BREWERY_MUC=jvbbrewery
+      - JVB_PORT=${JVB_PORT}
+      - JVB_TCP_HARVESTER_DISABLED=true
+      - TZ=${TZ}
+    depends_on:
+      - prosody
+    networks:
+      - ${PROXY_NETWORK}
+    ports:
+      - "${JVB_PORT}:${JVB_PORT}/udp"
+
+networks:
+  ${FRONTEND_NETWORK}:
+    external: true
+  ${PROXY_NETWORK}:
+    external: true

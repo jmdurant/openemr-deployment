@@ -1,0 +1,67 @@
+# PowerShell project .gitignore
+
+# Ignore Docker volume data
+*-dev/
+*-staging/
+*-test/
+*-prod/
+*-production/
+
+# Ignore backups
+backups/
+
+# Ignore source repositories (these should be cloned separately)
+source-repos/
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.lock.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# VS Code
+.vscode/
+.idea/
+*.code-workspace
+
+# PowerShell module files
+*.psd1
+*.psm1
+/Modules
+/Modules/
+
+# Package management files
+packages/
+node_modules/
+
+# Temporary files
+temp/
+tmp/
+.tmp/
+*~
+
+# Certificates
+*.pfx
+*.cer
+*.crt
+*.key
+*.pem 
