@@ -952,10 +952,10 @@ if ($Project -eq "official") {
         $httpPort = $envConfig.Config.containerPorts.openemr.http
         $httpsPort = $envConfig.Config.containerPorts.openemr.https
 
-        # Use regex to replace port mappings
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+ports:\s+.*?)(\s+- "80:80")', "`$1`$2`n      - `"$httpPort`:80`""
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+- "80:80")', "      - `"$httpPort`:80`""
-        $dockerComposeContent = $dockerComposeContent -replace '(\s+- "443:443")', "      - `"$httpsPort`:443`""
+        # Use regex to replace port mappings - handle both quoted and unquoted versions
+        $dockerComposeContent = $dockerComposeContent -replace '(\s+ports:\s+.*?)(\s+- )("|)?80:80("|)?', "`$1`$2`$3$httpPort:80`$4"
+        $dockerComposeContent = $dockerComposeContent -replace '(\s+- )("|)?80:80("|)?', "`$1`$2$httpPort:80`$3"
+        $dockerComposeContent = $dockerComposeContent -replace '(\s+- )("|)?443:443("|)?', "`$1`$2$httpsPort:443`$3"
 
         # Add project name to prevent conflicts
         $dockerComposeContent = "# Docker Compose for Official OpenEMR - $Environment`n`nversion: '3.1'`nname: $($envConfig.ProjectName)`n" + ($dockerComposeContent -replace "version: '3.1'", "")
@@ -1024,6 +1024,8 @@ HTTPS_PORT=$httpsPort
         }
     }
 }
+
+
 
 # Handle database volumes if needed
 if ($RemoveVolumes) {
