@@ -16,7 +16,8 @@ param (
     [Parameter(Mandatory=$false)]
     [bool]$SkipBackup = $false,
     [string]$DomainBase = "localhost",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$ARM = $false
 )
 
 # Set base project name based on environment
@@ -25,6 +26,7 @@ $baseProjectName = if ($Environment -eq "") { "$Project" } else { "$Project-$Env
 # Set DevMode based on environment (true for dev, false otherwise)
 $script:DevMode = $Environment -eq "dev"
 Write-Host "DevMode is $(if ($script:DevMode) { "enabled" } else { "disabled" }) for $Environment environment" -ForegroundColor $(if ($script:DevMode) { "Green" } else { "Yellow" })
+Write-Host "ARM mode is $(if ($ARM) { "enabled" } else { "disabled" })" -ForegroundColor $(if ($ARM) { "Green" } else { "Yellow" })
 
 # Function definitions
 function Handle-AllVolumes {
@@ -935,18 +937,68 @@ if ($Project -eq "official") {
         return
     }
 
-    # Copy docker-compose.yml from the official repository and adapt it
-    $sourceDockerCompose = Join-Path -Path $openemrSourceDir -ChildPath "docker\production\docker-compose.yml"
+    # Determine which docker-compose.yml to use based on environment and ARM flag
+    $dockerComposeSourcePath = ""
+    if ($Environment -eq "production" -or $Environment -eq "") {
+        if ($ARM) {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\production-arm\docker-compose.yml"
+            Write-Host "Using production ARM docker-compose.yml" -ForegroundColor Cyan
+        } else {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\production\docker-compose.yml"
+            Write-Host "Using production docker-compose.yml" -ForegroundColor Cyan
+        }
+    } elseif ($Environment -eq "dev") {
+        if ($ARM) {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\development-easy-arm\docker-compose.yml"
+            Write-Host "Using development-easy ARM docker-compose.yml" -ForegroundColor Cyan
+        } else {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\development-easy\docker-compose.yml"
+            Write-Host "Using development-easy docker-compose.yml" -ForegroundColor Cyan
+        }
+    } else {
+        # Default to production for other environments
+        if ($ARM) {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\production-arm\docker-compose.yml"
+            Write-Host "Using production ARM docker-compose.yml for $Environment environment" -ForegroundColor Cyan
+        } else {
+            $dockerComposeSourcePath = Join-Path -Path $openemrSourceDir -ChildPath "docker\production\docker-compose.yml"
+            Write-Host "Using production docker-compose.yml for $Environment environment" -ForegroundColor Cyan
+        }
+    }
+
     $targetDockerCompose = Join-Path -Path $openemrPath -ChildPath "docker-compose.yml"
 
-    if (-not (Test-Path -Path $sourceDockerCompose)) {
-        Write-Host "Error: Docker Compose file not found at $sourceDockerCompose" -ForegroundColor Red
-        return
+    # Check if the selected docker-compose file exists
+    if (-not (Test-Path -Path $dockerComposeSourcePath)) {
+        Write-Host "Error: Docker Compose file not found at $dockerComposeSourcePath" -ForegroundColor Red
+        
+        # Suggest alternative paths that might exist
+        $possiblePaths = @(
+            "docker\production\docker-compose.yml",
+            "docker\production-arm\docker-compose.yml",
+            "docker\development-easy\docker-compose.yml",
+            "docker\development-easy-arm\docker-compose.yml"
+        )
+        
+        Write-Host "Checking for alternative docker-compose files..." -ForegroundColor Yellow
+        foreach ($path in $possiblePaths) {
+            $fullPath = Join-Path -Path $openemrSourceDir -ChildPath $path
+            if (Test-Path -Path $fullPath) {
+                Write-Host "Found alternative docker-compose file at: $path" -ForegroundColor Green
+                $dockerComposeSourcePath = $fullPath
+                break
+            }
+        }
+        
+        if (-not (Test-Path -Path $dockerComposeSourcePath)) {
+            Write-Host "No alternative docker-compose files found. Please check your OpenEMR repository." -ForegroundColor Red
+            return
+        }
     }
 
     if (-not (Test-Path -Path $targetDockerCompose) -or $Force) {
-        Write-Host "Copying and adapting Docker Compose file..." -ForegroundColor Yellow
-        $dockerComposeContent = Get-Content -Path $sourceDockerCompose -Raw
+        Write-Host "Copying and adapting Docker Compose file from $dockerComposeSourcePath..." -ForegroundColor Yellow
+        $dockerComposeContent = Get-Content -Path $dockerComposeSourcePath -Raw
 
         # Replace the ports with environment-specific values
         $httpPort = $envConfig.Config.containerPorts.openemr.http
@@ -1828,6 +1880,114 @@ function Fix-OpenEMRModuleInstallerIssues {
     }
 }
 
+# Function to create a zip file of the entire deployment
+function Zip-Deployment {
+    param (
+        [string]$ProjectName,
+        [string]$Environment
+    )
+    
+    Write-Host "Creating zip archive of deployment..." -ForegroundColor Cyan
+    
+    # Create timestamp for zip file name
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $zipFileName = "$ProjectName-$Environment-$timestamp.zip"
+    $zipFilePath = Join-Path $PSScriptRoot $zipFileName
+    
+    try {
+        # The main deployment folder to include
+        $deploymentFolder = "$ProjectName-$Environment"
+        $deploymentFolderPath = Join-Path $PSScriptRoot $deploymentFolder
+        
+        if (-not (Test-Path -Path $deploymentFolderPath)) {
+            Write-Host "Deployment folder not found at: $deploymentFolderPath" -ForegroundColor Red
+            Write-Host "Please ensure the deployment was created correctly." -ForegroundColor Red
+            return $false
+        }
+        
+        Write-Host "Found deployment folder: $deploymentFolder" -ForegroundColor Green
+        
+        # Create a temporary directory listing file
+        $tempFile = [System.IO.Path]::GetTempFileName()
+        
+        # Add the primary deployment folder
+        Write-Host "  - Adding $deploymentFolder (main deployment folder)" -ForegroundColor Yellow
+        Add-Content -Path $tempFile -Value $deploymentFolder
+        
+        # Additional directories to include for a complete deployment
+        $additionalFolders = @(
+            "scripts",
+            "environments"
+        )
+        
+        # Add relevant additional folders
+        foreach ($folder in $additionalFolders) {
+            $folderPath = Join-Path $PSScriptRoot $folder
+            if (Test-Path -Path $folderPath) {
+                Write-Host "  - Adding $folder (supporting directory)" -ForegroundColor Yellow
+                Add-Content -Path $tempFile -Value $folder
+            }
+        }
+        
+        # Important files to include for deployment
+        $filesToInclude = @(
+            "setup.ps1",
+            "backup-and-staging.ps1",
+            "environment-config.ps1",
+            "fix-network-connections.ps1",
+            "network-setup.ps1",
+            "README.md"
+        )
+        
+        # Add each file if it exists
+        foreach ($file in $filesToInclude) {
+            $filePath = Join-Path $PSScriptRoot $file
+            if (Test-Path -Path $filePath) {
+                Write-Host "  - Adding $file (required script)" -ForegroundColor Yellow
+                Add-Content -Path $tempFile -Value $file
+            }
+        }
+        
+        # Check for .env file in the root directory
+        $envFilePath = Join-Path $PSScriptRoot ".env"
+        if (Test-Path -Path $envFilePath) {
+            Write-Host "  - Adding .env file (configuration)" -ForegroundColor Yellow
+            Add-Content -Path $tempFile -Value ".env"
+        }
+        
+        # Check if we have items to include
+        $itemsToZip = Get-Content -Path $tempFile
+        if ($itemsToZip.Count -eq 0) {
+            Write-Host "No files found to include in the archive." -ForegroundColor Red
+            Remove-Item -Path $tempFile -Force
+            return $false
+        }
+        
+        # Create the paths for Compress-Archive
+        $fullPathsToZip = $itemsToZip | ForEach-Object { Join-Path $PSScriptRoot $_ }
+        
+        # Create zip archive
+        Write-Host "Creating zip archive..." -ForegroundColor Green
+        Compress-Archive -Path $fullPathsToZip -DestinationPath $zipFilePath -Force
+        
+        # Clean up temp file
+        Remove-Item -Path $tempFile -Force
+        
+        # Get the size of the zip file
+        $fileInfo = Get-Item $zipFilePath
+        $fileSizeInMB = [Math]::Round($fileInfo.Length / 1MB, 2)
+        
+        Write-Host "Deployment archive created successfully: $zipFileName ($fileSizeInMB MB)" -ForegroundColor Green
+        Write-Host "Archive location: $zipFilePath" -ForegroundColor Green
+        Write-Host "You can use this archive to transfer the deployment to another server." -ForegroundColor Green
+        return $true
+    }
+    catch {
+        Write-Host "Error creating deployment archive: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
 # After starting containers, add the OpenEMR configuration prompt
 if ($DevMode) {
     # First prompt for database fix
@@ -1855,3 +2015,14 @@ if ($DevMode) {
         Write-Host "Skipping module installer issues fix" -ForegroundColor Yellow
     }
 }
+
+# Prompt for creating a deployment archive
+$createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
+if ($createZip -eq "y") {
+    Write-Host "Creating deployment archive..." -ForegroundColor Yellow
+    Zip-Deployment -ProjectName $envConfig.ProjectName -Environment $Environment
+} else {
+    Write-Host "Skipping deployment archive creation" -ForegroundColor Yellow
+}
+
+Write-Host "Setup complete for $($envConfig.ProjectName)!" -ForegroundColor Green

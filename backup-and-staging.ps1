@@ -11,7 +11,8 @@ param (
     [switch]$ForceRebuildWorkingCopy = $false,  # Whether to force rebuild of working copies
     [string]$DomainBase = "localhost",  # Default domain base is "localhost"
     [switch]$Force, # Add the Force switch
-    [switch]$SkipRepoUpdate # Add switch to optionally skip repo updates
+    [switch]$SkipRepoUpdate, # Add switch to optionally skip repo updates
+    [switch]$ARM # Add ARM switch for ARM architecture
 )
 
 # Function to get user input with clear prompting
@@ -119,6 +120,16 @@ if (-not $Environment) {
         }
     } else {
         Write-Host "Using default domain base: $DomainBase" -ForegroundColor Yellow
+    }
+    
+    # Prompt for ARM architecture
+    $useARM = Get-UserInput "`nDo you want to use ARM architecture? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "n"
+    if ($useARM -eq "y") {
+        $ARM = $true
+        Write-Host "Using ARM architecture" -ForegroundColor Green
+    } else {
+        $ARM = $false
+        Write-Host "Using standard architecture" -ForegroundColor Green
     }
 }
 
@@ -1411,17 +1422,6 @@ function Copy-OpenEMRFolder {
                     $dockerComposeContent = $dockerComposeContent -replace "version: '3.1'", "version: '3.1'`nname: $($envConfig.ProjectName)"
                 }
 
-                # Add DOMAIN environment variable if not present
-                if ($dockerComposeContent -notmatch "DOMAIN:") {
-                    # Search for the environment section of the openemr service
-                    if ($dockerComposeContent -match "(\s+environment:\s*\n)(\s+[^\n]+\n)+") {
-                        $match = $Matches[0]
-                        $lastEnvVarLine = $match.TrimEnd()
-                        $newEnvSection = "$lastEnvVarLine`n      DOMAIN: $($envConfig.Domains.openemr)"
-                        $dockerComposeContent = $dockerComposeContent.Replace($match, $newEnvSection)
-                    }
-                }
-
                 # Save the updated content
                 Set-Content -Path "$TargetDir\docker-compose.yml" -Value $dockerComposeContent
                 Write-Host "Updated official OpenEMR docker-compose file with environment variables" -ForegroundColor Green
@@ -2151,6 +2151,7 @@ try {
         Write-Host "Debug: Project = $Project" -ForegroundColor Magenta
         Write-Host "Debug: DevMode = $script:DevMode" -ForegroundColor Magenta
         Write-Host "Debug: dirName from envConfig = $($envConfig.DirectoryName)" -ForegroundColor Magenta
+        Write-Host "Debug: ARM = $ARM" -ForegroundColor Magenta
         
         # Construct the arguments for setup.ps1
         $setupArgs = @{
@@ -2158,9 +2159,15 @@ try {
             Project = $Project
             DomainBase = $DomainBase
         }
+        
         # Pass the -Force switch if it was provided to this script
         if ($PSBoundParameters.ContainsKey('Force')) {
              $setupArgs.Force = $Force
+        }
+        
+        # Pass the -ARM switch if it was provided to this script
+        if ($ARM) {
+            $setupArgs.ARM = $true
         }
         
         # Call setup.ps1 with splatting
@@ -2168,7 +2175,8 @@ try {
         
         Write-Host "`nSetup script completed for $Environment environment." -ForegroundColor Green
     } else {
-        Write-Host "For full customization, run setup.ps1 manually: .\setup.ps1 -Environment $Environment -Project $Project -DomainBase $DomainBase" -ForegroundColor Yellow
+        $armParam = if ($ARM) { " -ARM" } else { "" }
+        Write-Host "For full customization, run setup.ps1 manually: .\setup.ps1 -Environment $Environment -Project $Project -DomainBase $DomainBase$armParam" -ForegroundColor Yellow
     }
     
     # Update ChromeDriver for Selenium scripts
