@@ -2020,9 +2020,138 @@ if ($DevMode) {
 $createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
 if ($createZip -eq "y") {
     Write-Host "Creating deployment archive..." -ForegroundColor Yellow
-    Zip-Deployment -ProjectName $envConfig.ProjectName -Environment $Environment
+    $zipResult = Zip-Deployment -ProjectName $envConfig.ProjectName -Environment $Environment
+    if ($zipResult) {
+        # After successful zip, prompt for Oracle deployment
+        $oracleDeploy = Get-UserInput -Prompt "Would you like to deploy this environment to Oracle Free Tier with WireGuard? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
+        if ($oracleDeploy -eq "y") {
+            # Find the most recent zip file matching the pattern
+            $zipPattern = "$($envConfig.ProjectName)-$Environment-*.zip"
+            $zipFile = Get-ChildItem -Path $PSScriptRoot -Filter $zipPattern | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($zipFile) {
+                $destDir = Join-Path $PSScriptRoot "infrastructure-oci\resources"
+                if (-not (Test-Path $destDir)) {
+                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                }
+                $destZip = Join-Path $destDir "docker-wireguard-openemr.zip"
+                Copy-Item -Path $zipFile.FullName -Destination $destZip -Force
+                Write-Host "Copied deployment zip to: $destZip" -ForegroundColor Green
+                # Optional: Prompt to run terraform apply
+                $runTerraform = Get-UserInput -Prompt "Would you like to run 'terraform apply' now? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
+                if ($runTerraform -eq "y") {
+                    Push-Location (Join-Path $PSScriptRoot "infrastructure-oci")
+                    terraform apply
+                    Pop-Location
+                } else {
+                    Write-Host "To deploy, run 'terraform apply' in the infrastructure-oci directory." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "Could not find the deployment zip file to copy for Oracle deployment." -ForegroundColor Red
+            }
+        }
+    }
 } else {
     Write-Host "Skipping deployment archive creation" -ForegroundColor Yellow
 }
 
+# Prompt to merge OpenEMR into WireGuard/Unbound deployment zip
+$mergeToWireguardZip = Get-UserInput -Prompt "Would you like to merge your OpenEMR deployment into the WireGuard/Unbound deployment zip for Oracle? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+if ($mergeToWireguardZip -eq "y") {
+    $wireguardZip = Join-Path $PSScriptRoot "infrastructure-oci\resources\docker-wireguard-unbound.zip"
+    $tempDir = Join-Path $PSScriptRoot "temp-merge"
+    $openemrDir = Join-Path $PSScriptRoot "$($envConfig.ProjectName)-$Environment"  # or however your output dir is named
+
+    # 1. Extract the existing zip
+    if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
+    Expand-Archive -Path $wireguardZip -DestinationPath $tempDir
+
+    # 2. Copy OpenEMR deployment into the extracted directory
+    Copy-Item -Path "$openemrDir\*" -Destination $tempDir -Recurse -Force
+
+    # 2.5 Remove AdGuard service from docker-compose.yml if present
+    $composePath = Join-Path $tempDir "docker-compose.yml"
+    if (Test-Path $composePath) {
+        $composeContent = Get-Content $composePath -Raw
+        # Remove the adguard service block (simple regex for YAML)
+        $composeContent = $composeContent -replace "(?ms)^\s*adguard:.*?(?=^\S|\z)", ""
+        Set-Content -Path $composePath -Value $composeContent
+        Write-Host "Removed AdGuard service from docker-compose.yml in temp directory." -ForegroundColor Green
+    }
+
+    # 3. Re-zip everything
+    if (Test-Path $wireguardZip) { Remove-Item $wireguardZip -Force }
+    Compress-Archive -Path "$tempDir\*" -DestinationPath $wireguardZip -Force
+
+    # 4. Clean up
+    Remove-Item $tempDir -Recurse -Force
+
+    Write-Host "Merged OpenEMR deployment into docker-wireguard-unbound.zip" -ForegroundColor Green
+}
+
 Write-Host "Setup complete for $($envConfig.ProjectName)!" -ForegroundColor Green
+
+# Check if Terraform is available in PATH, if not, download and extract the latest version
+function Ensure-Terraform {
+    $terraformCmd = "terraform"
+    $terraformExe = "terraform.exe"
+    $terraformExtractDir = Join-Path $PSScriptRoot "terraform-bin"
+    $terraformPath = $null
+
+    # Check if terraform is in PATH
+    $found = $false
+    $env:PATH.Split(';') | ForEach-Object {
+        if (Test-Path (Join-Path $_ $terraformExe)) {
+            $found = $true
+            $terraformPath = Join-Path $_ $terraformExe
+        }
+    }
+
+    if (-not $found) {
+        Write-Host "Terraform not found in PATH. Downloading latest version..." -ForegroundColor Cyan
+        # Get latest version from releases.hashicorp.com
+        $releasesUrl = "https://releases.hashicorp.com/terraform/"
+        $html = Invoke-WebRequest -Uri $releasesUrl -UseBasicParsing
+        $version = ($html.Links | Where-Object { $_.href -match "^/terraform/1\\.[0-9]+\\.[0-9]+/?$" } | ForEach-Object { $_.href -replace "/terraform/|/$", "" } | Sort-Object -Descending | Select-Object -First 1)
+        if (-not $version) { $version = "1.7.5" } # fallback
+        $terraformZipUrl = "https://releases.hashicorp.com/terraform/$version/terraform_${version}_windows_amd64.zip"
+        $terraformZipPath = Join-Path $PSScriptRoot "terraform_${version}_windows_amd64.zip"
+
+        # Download
+        Invoke-WebRequest -Uri $terraformZipUrl -OutFile $terraformZipPath
+        if (-not (Test-Path $terraformExtractDir)) {
+            New-Item -ItemType Directory -Path $terraformExtractDir | Out-Null
+        }
+        Expand-Archive -Path $terraformZipPath -DestinationPath $terraformExtractDir -Force
+        Remove-Item $terraformZipPath -Force
+        $terraformPath = Join-Path $terraformExtractDir $terraformExe
+        $env:PATH = "$terraformExtractDir;$env:PATH"
+        Write-Host "Terraform $version downloaded and available at $terraformPath" -ForegroundColor Green
+    } else {
+        Write-Host "Terraform found in PATH at $terraformPath" -ForegroundColor Green
+    }
+    return $terraformPath
+}
+
+# Ensure Terraform is available before any terraform commands
+$TerraformExePath = Ensure-Terraform
+
+# After copying/merging the deployment zip and before running terraform
+$oracleDeploy = Get-UserInput -Prompt "Would you like to deploy this environment to Oracle Free Tier with WireGuard? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
+if ($oracleDeploy -eq "y") {
+    # Ensure Terraform is available
+    $TerraformExePath = Ensure-Terraform
+    $infraDir = Join-Path $PSScriptRoot "infrastructure-oci"
+    Push-Location $infraDir
+    try {
+        Write-Host "Running: terraform init" -ForegroundColor Cyan
+        & $TerraformExePath init
+        Write-Host "Running: terraform plan" -ForegroundColor Cyan
+        & $TerraformExePath plan
+        Write-Host "Running: terraform apply" -ForegroundColor Cyan
+        & $TerraformExePath apply
+    } catch {
+        Write-Host "Error running Terraform: $_" -ForegroundColor Red
+    } finally {
+        Pop-Location
+    }
+}

@@ -1,7 +1,7 @@
 # Run this script as Administrator
 param(
     [string]$Project = "official",
-    [string]$Environment = "production",
+    [string]$Environment = "dev",
     [string]$DomainBase = "localhost"
 )
 
