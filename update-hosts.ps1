@@ -1,8 +1,8 @@
 # Run this script as Administrator
 param(
     [string]$Project = "official",
-    [string]$Environment = "dev",
-    [string]$DomainBase = "localhost"
+    [string]$Environment = "staging",
+    [string]$DomainBase = "vr2fit.com"
 )
 
 $hostsFile = "C:\Windows\System32\drivers\etc\hosts"
