@@ -20,6 +20,15 @@ param (
     [switch]$ARM = $false
 )
 
+# Parameter Debugging - Show actual values received
+Write-Host "====== PARAMETER DEBUG INFO ======" -ForegroundColor Cyan
+Write-Host "Environment = '$Environment'" -ForegroundColor Magenta
+Write-Host "Project = '$Project'" -ForegroundColor Magenta
+Write-Host "DomainBase = '$DomainBase'" -ForegroundColor Magenta
+Write-Host "All bound parameters:" -ForegroundColor Magenta
+$PSBoundParameters.Keys | ForEach-Object { Write-Host "  $_ = '$($PSBoundParameters[$_])'" -ForegroundColor Magenta }
+Write-Host "================================" -ForegroundColor Cyan
+
 # Set base project name based on environment
 $baseProjectName = if ($Environment -eq "") { "$Project" } else { "$Project-$Environment" }
 
@@ -1540,11 +1549,36 @@ Write-Host "6. Certificates configured" -ForegroundColor White
 Write-Host "7. Nginx Proxy Manager configured (if requested)" -ForegroundColor White
 Write-Host "8. Database volumes: $(if ($RemoveVolumes) { 'Removed and recreated' } else { 'Preserved existing data' })" -ForegroundColor White
 Write-Host ""
+
+# Debug info for domain setup
+Write-Host "Debug: DomainBase parameter = $DomainBase" -ForegroundColor Magenta
+
+# Ensure domains are set correctly based on DomainBase parameter
+if (-not $envConfig) { $envConfig = @{} }
+if (-not $envConfig.Domains) { $envConfig.Domains = @{} }
+if (-not $envConfig.ContainerPorts) { $envConfig.ContainerPorts = @{openemr=@{}} }
+if (-not $envConfig.NpmPorts) { $envConfig.NpmPorts = @{} }
+
+# Set domains explicitly based on the DomainBase parameter
+$prefix = $Environment.ToLower()
+if ($DomainBase -ne "localhost") {
+    # This ensures domains are set correctly regardless of how environment-config.ps1 is loaded
+    Write-Host "Debug: Explicitly setting domains with $DomainBase" -ForegroundColor Magenta
+    $envConfig.Domains.openemr = "$prefix-$Project.$DomainBase"
+    $envConfig.Domains.telehealth = "vc-$prefix-$Project.$DomainBase"
+    $envConfig.Domains.jitsi = "vcbknd-$prefix-$Project.$DomainBase"
+}
+
+Write-Host "Debug: Resulting domains:" -ForegroundColor Magenta
+Write-Host "  openemr = $($envConfig.Domains.openemr)" -ForegroundColor Magenta
+Write-Host "  telehealth = $($envConfig.Domains.telehealth)" -ForegroundColor Magenta
+
 Write-Host "`nAccess Information:" -ForegroundColor Yellow
-Write-Host "- OpenEMR Direct Access: http://localhost:$($envConfig.ContainerPorts.openemr.http)" -ForegroundColor Green
+# Using consistent domain naming for all URLs
+Write-Host "- OpenEMR Direct Access: http://$($envConfig.Domains.openemr):$($envConfig.ContainerPorts.openemr.http)" -ForegroundColor Green
 Write-Host "- OpenEMR via NPM: https://$($envConfig.Domains.openemr):$($envConfig.NpmPorts.https)" -ForegroundColor Green
 Write-Host "- Telehealth via NPM: https://$($envConfig.Domains.telehealth):$($envConfig.NpmPorts.https)" -ForegroundColor Green
-Write-Host "- Nginx Proxy Manager Admin: http://localhost:$($envConfig.NpmPorts.admin)" -ForegroundColor Green
+Write-Host "- Nginx Proxy Manager Admin: http://$($envConfig.Domains.openemr):$($envConfig.NpmPorts.admin)" -ForegroundColor Green
 Write-Host "- NPM HTTP Port: $($envConfig.NpmPorts.http)" -ForegroundColor Green
 Write-Host "- NPM HTTPS Port: $($envConfig.NpmPorts.https)" -ForegroundColor Green
 Write-Host ""
@@ -1896,8 +1930,13 @@ function Zip-Deployment {
     
     try {
         # The main deployment folder to include
-        $deploymentFolder = "$ProjectName-$Environment"
+        # Since ProjectName already includes the environment (e.g., "official-staging"),
+        # we don't need to append the environment again
+        $deploymentFolder = "$ProjectName"
         $deploymentFolderPath = Join-Path $PSScriptRoot $deploymentFolder
+        
+        # Debug output to verify the path we're looking for
+        Write-Host "Looking for deployment folder at: $deploymentFolderPath" -ForegroundColor Yellow
         
         if (-not (Test-Path -Path $deploymentFolderPath)) {
             Write-Host "Deployment folder not found at: $deploymentFolderPath" -ForegroundColor Red
@@ -1907,71 +1946,57 @@ function Zip-Deployment {
         
         Write-Host "Found deployment folder: $deploymentFolder" -ForegroundColor Green
         
-        # Create a temporary directory listing file
-        $tempFile = [System.IO.Path]::GetTempFileName()
+        # Create a simplified zip that only includes the deployment folder itself
+        Write-Host "  - Adding only the deployment folder to the zip" -ForegroundColor Yellow
         
-        # Add the primary deployment folder
-        Write-Host "  - Adding $deploymentFolder (main deployment folder)" -ForegroundColor Yellow
-        Add-Content -Path $tempFile -Value $deploymentFolder
+        # Explicitly stop database/proxy containers to avoid file locking issues
+        Write-Host "Stopping database containers to avoid file locking issues..." -ForegroundColor Yellow
         
-        # Additional directories to include for a complete deployment
-        $additionalFolders = @(
-            "scripts",
-            "environments"
-        )
-        
-        # Add relevant additional folders
-        foreach ($folder in $additionalFolders) {
-            $folderPath = Join-Path $PSScriptRoot $folder
-            if (Test-Path -Path $folderPath) {
-                Write-Host "  - Adding $folder (supporting directory)" -ForegroundColor Yellow
-                Add-Content -Path $tempFile -Value $folder
+        try {
+            # Try to stop any database containers to avoid locks
+            $dbContainerPattern = "$ProjectName-*-database-*"
+            $proxyContainerPattern = "$ProjectName-proxy-*"
+            
+            Write-Host "Identifying running containers that may lock files..." -ForegroundColor Yellow
+            $stoppedContainers = @()
+            $containers = docker ps --format "{{.Names}}" | Where-Object { $_ -like $dbContainerPattern -or $_ -like $proxyContainerPattern }
+            
+            if ($containers) {
+                Write-Host "Found containers that might lock database files:" -ForegroundColor Yellow
+                $containers | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+                
+                # Ask user if they want to stop these containers
+                $stopContainers = Get-UserInput -Prompt "Do you want to stop these containers before creating the zip? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+                
+                if ($stopContainers -eq "y") {
+                    foreach ($container in $containers) {
+                        Write-Host "Stopping container: $container" -ForegroundColor Yellow
+                        docker stop $container
+                        # Keep track of stopped containers so we can restart them later
+                        $stoppedContainers += $container
+                    }
+                    # Give containers time to release file locks
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "Containers will remain running. The zip operation may fail if files are locked." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No database or proxy containers found running." -ForegroundColor Green
             }
+            
+            # Save the list of stopped containers for later restart
+            $global:stoppedContainers = $stoppedContainers
+        } catch {
+            Write-Host "Warning: Could not check for running containers: $_" -ForegroundColor Yellow
+            # Continue with the zip operation anyway
         }
         
-        # Important files to include for deployment
-        $filesToInclude = @(
-            "setup.ps1",
-            "backup-and-staging.ps1",
-            "environment-config.ps1",
-            "fix-network-connections.ps1",
-            "network-setup.ps1",
-            "README.md"
-        )
+        # Only include the deployment folder in the zip archive
+        $fullPathToZip = Join-Path $PSScriptRoot $deploymentFolder
         
-        # Add each file if it exists
-        foreach ($file in $filesToInclude) {
-            $filePath = Join-Path $PSScriptRoot $file
-            if (Test-Path -Path $filePath) {
-                Write-Host "  - Adding $file (required script)" -ForegroundColor Yellow
-                Add-Content -Path $tempFile -Value $file
-            }
-        }
-        
-        # Check for .env file in the root directory
-        $envFilePath = Join-Path $PSScriptRoot ".env"
-        if (Test-Path -Path $envFilePath) {
-            Write-Host "  - Adding .env file (configuration)" -ForegroundColor Yellow
-            Add-Content -Path $tempFile -Value ".env"
-        }
-        
-        # Check if we have items to include
-        $itemsToZip = Get-Content -Path $tempFile
-        if ($itemsToZip.Count -eq 0) {
-            Write-Host "No files found to include in the archive." -ForegroundColor Red
-            Remove-Item -Path $tempFile -Force
-            return $false
-        }
-        
-        # Create the paths for Compress-Archive
-        $fullPathsToZip = $itemsToZip | ForEach-Object { Join-Path $PSScriptRoot $_ }
-        
-        # Create zip archive
-        Write-Host "Creating zip archive..." -ForegroundColor Green
-        Compress-Archive -Path $fullPathsToZip -DestinationPath $zipFilePath -Force
-        
-        # Clean up temp file
-        Remove-Item -Path $tempFile -Force
+        # Create zip archive with just the deployment folder
+        Write-Host "Creating zip archive with only the deployment folder..." -ForegroundColor Green
+        Compress-Archive -Path $fullPathToZip -DestinationPath $zipFilePath -Force
         
         # Get the size of the zip file
         $fileInfo = Get-Item $zipFilePath
@@ -1980,6 +2005,17 @@ function Zip-Deployment {
         Write-Host "Deployment archive created successfully: $zipFileName ($fileSizeInMB MB)" -ForegroundColor Green
         Write-Host "Archive location: $zipFilePath" -ForegroundColor Green
         Write-Host "You can use this archive to transfer the deployment to another server." -ForegroundColor Green
+        
+        # Restart any containers that were stopped for zip creation
+        if ($global:stoppedContainers -and $global:stoppedContainers.Count -gt 0) {
+            Write-Host "Restarting containers that were stopped for zip creation..." -ForegroundColor Yellow
+            foreach ($container in $global:stoppedContainers) {
+                Write-Host "Starting container: $container" -ForegroundColor Yellow
+                docker start $container
+            }
+            Write-Host "All containers restarted." -ForegroundColor Green
+        }
+        
         return $true
     }
     catch {
@@ -1989,9 +2025,11 @@ function Zip-Deployment {
 }
 
 # After starting containers, add the OpenEMR configuration prompt
-if ($DevMode) {
+# Check Environment parameter directly instead of relying on DevMode variable
+Write-Host "Debug before DevMode check: Environment=$Environment, DevMode=$script:DevMode" -ForegroundColor Magenta
+if ($Environment -eq "dev") {
     # First prompt for database fix
-    $fixDatabase = Get-UserInput -Prompt "Would you like to fix OpenEMR encryption keys (needed if you see blank screen issues)? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "y"
+    $fixDatabase = Get-UserInput -Prompt "Would you like to fix OpenEMR encryption keys (needed if you see blank screen issues)? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "n"
     if ($fixDatabase -eq "y") {
         Write-Host "Fixing OpenEMR database encryption keys..." -ForegroundColor Yellow
         Fix-OpenEMRDatabase -Environment $Environment -ProjectName $envConfig.ProjectName
@@ -1999,7 +2037,7 @@ if ($DevMode) {
         Write-Host "Skipping encryption key fix" -ForegroundColor Yellow
     }
     # Separate prompt for OpenEMR configuration
-    $configureOpenEMR = Get-UserInput -Prompt "Would you like to configure OpenEMR for development mode? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "y"
+    $configureOpenEMR = Get-UserInput -Prompt "Would you like to configure OpenEMR for development mode? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "n"
     if ($configureOpenEMR -eq "y") {
         Write-Host "Configuring OpenEMR for development mode..." -ForegroundColor Yellow
         Configure-OpenEMR -Environment $Environment -ProjectName $envConfig.ProjectName
@@ -2007,7 +2045,7 @@ if ($DevMode) {
         Write-Host "Skipping OpenEMR configuration" -ForegroundColor Yellow
     }
     # First prompt for database fix
-    $fixDatabase = Get-UserInput -Prompt "Would you like to fix OpenEMR module installer issues? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "y"
+    $fixDatabase = Get-UserInput -Prompt "Would you like to fix OpenEMR module installer issues? (y/n) " -ValidResponses @("y", "n") -DefaultResponse "n"
     if ($fixDatabase -eq "y") {
         Write-Host "Fixing OpenEMR module installer issues..." -ForegroundColor Yellow
         Fix-OpenEMRModuleInstallerIssues -ProjectName $envConfig.ProjectName
@@ -2017,7 +2055,7 @@ if ($DevMode) {
 }
 
 # Prompt for creating a deployment archive
-$createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
+$createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
 if ($createZip -eq "y") {
     Write-Host "Creating deployment archive..." -ForegroundColor Yellow
     $zipResult = Zip-Deployment -ProjectName $envConfig.ProjectName -Environment $Environment
@@ -2055,7 +2093,7 @@ if ($createZip -eq "y") {
 }
 
 # Prompt to merge OpenEMR into WireGuard/Unbound deployment zip
-$mergeToWireguardZip = Get-UserInput -Prompt "Would you like to merge your OpenEMR deployment into the WireGuard/Unbound deployment zip for Oracle? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+$mergeToWireguardZip = Get-UserInput -Prompt "Would you like to merge your OpenEMR deployment into the WireGuard/Unbound deployment zip for Oracle? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
 if ($mergeToWireguardZip -eq "y") {
     $wireguardZip = Join-Path $PSScriptRoot "infrastructure-oci\resources\docker-wireguard-unbound.zip"
     $tempDir = Join-Path $PSScriptRoot "temp-merge"

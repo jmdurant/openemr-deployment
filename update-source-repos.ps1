@@ -3,6 +3,8 @@
 
 param (
     [string]$Project = "aiotp",
+    [string]$Environment = "production",
+    [string]$DomainBase = "localhost",
     [string]$OpenEMRRepoUrl = "",
     [string]$TelehealthRepoUrl = "",
     [string]$OpenEMRBranch = "master",
@@ -11,7 +13,10 @@ param (
 )
 
 # Load environment configuration to get repository URLs
-$envConfig = . "$PSScriptRoot\environment-config.ps1" -Environment "dev" -Project $Project
+$envConfig = . "$PSScriptRoot\environment-config.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase
+
+# Add debug output to verify environment being used
+Write-Host "Debug: Loading repositories with Environment=$Environment, Project=$Project, DomainBase=$DomainBase" -ForegroundColor Magenta
 if (-not $envConfig) {
     Write-Host "Failed to load environment configuration" -ForegroundColor Red
     exit 1

@@ -87,7 +87,7 @@ $config = @{
         npmPorts = @{
             http = "8081"
             https = "8443"
-            admin = "8181"
+            admin = "91"
         }
         domains = @{
             openemr = "staging.localhost"
@@ -125,7 +125,7 @@ $config = @{
         npmPorts = @{
             http = "8082"
             https = "8463"
-            admin = "8281"
+            admin = "101"
         }
         domains = @{
             openemr = "dev.localhost"
@@ -163,7 +163,7 @@ $config = @{
         npmPorts = @{
             http = "8083"
             https = "8473"
-            admin = "8381"
+            admin = "111"
         }
         domains = @{
             openemr = "test.localhost"
@@ -194,18 +194,19 @@ if ($Project -ne "aiotp") {
     $config[$Environment].containerPorts.openemr.mysql = [int]$config[$Environment].containerPorts.openemr.mysql + $offset
     $config[$Environment].containerPorts.telehealth.web = [int]$config[$Environment].containerPorts.telehealth.web + $offset
     $config[$Environment].containerPorts.telehealth.db = [int]$config[$Environment].containerPorts.telehealth.db + $offset
-    
-    # Modify domain names to prevent conflicts
-    if ($Environment -eq "production") {
-        $config[$Environment].domains.openemr = "$Project.$DomainBase"
-        $config[$Environment].domains.telehealth = "vc-$Project.$DomainBase"
-        $config[$Environment].domains.jitsi = "vcbknd-$Project.$DomainBase"
-    } else {
-        $prefix = $Environment.ToLower()
-        $config[$Environment].domains.openemr = "$prefix-$Project.$DomainBase"
-        $config[$Environment].domains.telehealth = "vc-$prefix-$Project.$DomainBase"
-        $config[$Environment].domains.jitsi = "vcbknd-$prefix-$Project.$DomainBase"
-    }
+}
+
+# Always modify domain names based on DomainBase parameter, regardless of project
+# This ensures custom domains work for all projects
+if ($Environment -eq "production") {
+    $config[$Environment].domains.openemr = "$Project.$DomainBase"
+    $config[$Environment].domains.telehealth = "vc-$Project.$DomainBase"
+    $config[$Environment].domains.jitsi = "vcbknd-$Project.$DomainBase"
+} else {
+    $prefix = $Environment.ToLower()
+    $config[$Environment].domains.openemr = "$prefix-$Project.$DomainBase"
+    $config[$Environment].domains.telehealth = "vc-$prefix-$Project.$DomainBase"
+    $config[$Environment].domains.jitsi = "vcbknd-$prefix-$Project.$DomainBase"
 }
 
 # Folder names for components (consistent across all environments)

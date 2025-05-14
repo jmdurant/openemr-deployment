@@ -179,8 +179,11 @@ if (-not $SkipRepoUpdate) {
     Write-Host "Using OpenEMR branch: $OpenEMRBranch" -ForegroundColor Cyan
     Write-Host "Using Telehealth branch: $TelehealthBranch" -ForegroundColor Cyan
 
-    # Call the update script with correct branch names
-    $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project $Project -OpenEMRRepoUrl $OpenEMRRepoUrl -TelehealthRepoUrl $TelehealthRepoUrl -OpenEMRBranch $OpenEMRBranch -TelehealthBranch $TelehealthBranch -Force:$Force
+    # Call the update script with correct branch names and environment parameter
+    $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project $Project -Environment $Environment -DomainBase $DomainBase -OpenEMRRepoUrl $OpenEMRRepoUrl -TelehealthRepoUrl $TelehealthRepoUrl -OpenEMRBranch $OpenEMRBranch -TelehealthBranch $TelehealthBranch -Force:$Force
+    
+    # Add debug output to verify environment parameter
+    Write-Host "Debug: Called update-source-repos.ps1 with Environment=$Environment" -ForegroundColor Magenta
     
     if (-not $repoResult.Success) {
         Write-Host "Failed to update source repositories. Continuing with existing repositories if they exist..." -ForegroundColor Yellow
@@ -205,7 +208,7 @@ if ($Project -eq "official") {
     if ((-not (Test-Path $openemrSourceDir)) -and (-not $SkipRepoUpdate)) {
         Write-Host "Official OpenEMR source repository not found. Attempting to clone it now..." -ForegroundColor Yellow
         # Call update script specifically for official project
-        $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project "official" -Force:$Force
+        $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project "official" -DomainBase $DomainBase -Force:$Force
         
         if (-not $repoResult.Success) {
             Write-ErrorAndExit "Failed to clone official OpenEMR repository. Please clone it manually to $openemrSourceDir or run without -SkipRepoUpdate."
@@ -2149,16 +2152,21 @@ try {
         # Debug output
         Write-Host "Debug: Environment = $Environment" -ForegroundColor Magenta
         Write-Host "Debug: Project = $Project" -ForegroundColor Magenta
+        Write-Host "Debug: DomainBase = $DomainBase" -ForegroundColor Magenta
         Write-Host "Debug: DevMode = $script:DevMode" -ForegroundColor Magenta
         Write-Host "Debug: dirName from envConfig = $($envConfig.DirectoryName)" -ForegroundColor Magenta
         Write-Host "Debug: ARM = $ARM" -ForegroundColor Magenta
         
         # Construct the arguments for setup.ps1
+        # Make sure to pass Environment exactly as received
         $setupArgs = @{
-            Environment = $Environment
+            Environment = $Environment.ToString()
             Project = $Project
             DomainBase = $DomainBase
         }
+        
+        # Add debug output to verify Environment value
+        Write-Host "Debug: Passing Environment='$Environment' to setup.ps1" -ForegroundColor Magenta
         
         # Pass the -Force switch if it was provided to this script
         if ($PSBoundParameters.ContainsKey('Force')) {
@@ -2177,14 +2185,6 @@ try {
     } else {
         $armParam = if ($ARM) { " -ARM" } else { "" }
         Write-Host "For full customization, run setup.ps1 manually: .\setup.ps1 -Environment $Environment -Project $Project -DomainBase $DomainBase$armParam" -ForegroundColor Yellow
-    }
-    
-    # Update ChromeDriver for Selenium scripts
-    $updateChromeDriverScript = Join-Path $PSScriptRoot "update-chromedriver.ps1"
-    if (Test-Path $updateChromeDriverScript) {
-        Write-Host "`nUpdating ChromeDriver to match current Chrome version..." -ForegroundColor Cyan
-        & "$PSScriptRoot\update-chromedriver.ps1"
-        Write-Host "ChromeDriver update completed." -ForegroundColor Green
     }
     
     # Display final success messages
