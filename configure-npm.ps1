@@ -693,7 +693,38 @@ if ($envConfig) {
         $envConfig.NpmPorts.http
     }
     
-    # OpenEMR
+    # WordPress (Main Site) - This will be at the base domain with environment prefix for non-production
+    # WordPress container uses the project name with -wordpress suffix
+    $wordpressContainerName = "$baseProjectName-wordpress-wordpress-1"
+    
+    # WordPress domain should include environment prefix for non-production
+    $wordpressDomain = if ($Environment -eq "production") {
+        # Production uses the base domain (e.g., vr2fit.com)
+        $DomainBase
+    } else {
+        # Non-production environments use the environment name as prefix
+        "$($Environment.ToLower()).$DomainBase"
+    }
+    
+    # WordPress proxy host - this will route to WordPress
+    Write-Host "Setting up WordPress proxy host for domain: $wordpressDomain" -ForegroundColor Cyan
+    Write-Host "WordPress container: $wordpressContainerName" -ForegroundColor Cyan
+    
+    # Make sure the container exists before creating the proxy host
+    $wordpressContainerExists = docker ps --format "{{.Names}}" | Where-Object { $_ -eq $wordpressContainerName }
+    
+    if ($wordpressContainerExists) {
+        $wordpressResponse = New-ProxyHost -Token $token -DomainNames @($wordpressDomain) -ForwardHost $wordpressContainerName -ForwardPort 80 -BlockExploits $true -AllowWebsocket $false -ForceSSL $true -HTTP2Support $true -certificate_id $certId -Force:$Force
+        if ($wordpressResponse) {
+            Write-Host "WordPress proxy host created or found successfully for domain: $wordpressDomain" -ForegroundColor Green
+        } else {
+            Write-Host "Failed to create WordPress proxy host for domain: $wordpressDomain" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "WordPress container not found. Skipping proxy host creation." -ForegroundColor Yellow
+    }
+    
+    # OpenEMR - keep it at its current domain (e.g., notes.localhost or staging-notes.localhost)
     $openemrResponse = New-ProxyHost -Token $token -DomainNames @($envConfig.Domains.openemr) -ForwardHost $openemrContainerName -ForwardPort $forwardPort -BlockExploits $true -AllowWebsocket $false -ForceSSL $true -HTTP2Support $true -certificate_id $certId -Force:$Force
     if ($openemrResponse) {
         Write-Host "OpenEMR proxy host created or found successfully" -ForegroundColor Green
@@ -716,24 +747,69 @@ if ($envConfig) {
     } else {
         Write-Host "Failed to create Jitsi Backend proxy host" -ForegroundColor Red
     }
+    
+    # Fix NPM network connections
+    Fix-NpmNetwork -Environment $Environment -ProjectName $Project
+    
+    # Check for WordPress container and connect it to NPM proxy network if it exists
+    $WordPressContainer = docker ps --format "{{.Names}}" | Where-Object { 
+        $_ -like "*$baseProjectName-wordpress*" -or $_ -like "*wordpress*" 
+    } | Select-Object -First 1
+    
+    if ($WordPressContainer) {
+        Write-Host "Detected WordPress container: $WordPressContainer" -ForegroundColor Cyan
+        
+        # Get network configuration
+        $networkConfig = . "$PSScriptRoot\network-setup.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase
+        
+        # Connect WordPress container directly to proxy network (not frontend) for better isolation
+        $proxyNetwork = $networkConfig.ProxyNetwork
+        $isConnected = docker network inspect $proxyNetwork --format '{{range .Containers}}{{.Name}} {{end}}' | Select-String -Pattern $WordPressContainer
+        
+        if (-not $isConnected) {
+            Write-Host "Connecting WordPress container to proxy network..." -ForegroundColor Yellow
+            # Check if network exists first to avoid errors
+            $networkExists = docker network ls --format "{{.Name}}" | Select-String -Pattern $proxyNetwork
+            if (-not $networkExists) {
+                docker network create $proxyNetwork 2>$null
+            }
+            docker network connect $proxyNetwork $WordPressContainer
+            Write-Host "Connected WordPress container to proxy network" -ForegroundColor Green
+        } else {
+            Write-Host "WordPress container already connected to proxy network" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "No WordPress container detected" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "Creating proxy hosts for production environment..." -ForegroundColor Cyan
 }    
 
 Write-Host "" -ForegroundColor Green
 Write-Host "Nginx Proxy Manager configuration complete!" -ForegroundColor Green
-Write-Host "You can now access:" -ForegroundColor Green
+
+Write-Host "Configuration complete. You can access the following services:" -ForegroundColor Green
 
 if ($envConfig) {
     Write-Host "  - OpenEMR at https://$($envConfig.Domains.openemr)" -ForegroundColor Cyan
     Write-Host "  - Telehealth Frontend at https://$($envConfig.Domains.telehealth)/videoconsultation" -ForegroundColor Cyan
     Write-Host "  - Jitsi Backend at https://$($envConfig.Domains.jitsi)" -ForegroundColor Cyan
     Write-Host "  - Nginx Proxy Manager Admin at http://localhost:$($envConfig.NpmPorts.admin)" -ForegroundColor Cyan
+    
+    # Add WordPress URL if the container was detected
+    if ($WordPressContainer -and $envConfig.Domains.PSObject.Properties.Name -contains "wordpress") {
+        Write-Host "  - WordPress at https://$($envConfig.Domains.wordpress)" -ForegroundColor Cyan
+    }
 } else {
     Write-Host "  - OpenEMR at https://localhost" -ForegroundColor Cyan
     Write-Host "  - Telehealth Frontend at https://vc.localhost/videoconsultation" -ForegroundColor Cyan
     Write-Host "  - Jitsi Backend at https://vcbknd.localhost" -ForegroundColor Cyan
     Write-Host "  - Nginx Proxy Manager Admin at http://localhost:81" -ForegroundColor Cyan
+    
+    # Add WordPress URL if the container was detected
+    if ($WordPressContainer) {
+        Write-Host "  - WordPress at http://localhost:33080" -ForegroundColor Cyan
+    }
 }
 
 Write-Host "" -ForegroundColor Green
@@ -763,3 +839,55 @@ function Get-Container {
 if ($Environment) {
     Fix-NpmNetwork -Environment $Environment -ProjectName $Project
 }
+
+# Function to connect WordPress container to proxy network for isolation
+function Connect-WordPressToProxyNetwork {
+    param (
+        [string]$Environment,
+        [string]$Project,
+        [string]$DomainBase
+    )
+    
+    # Find WordPress container - use various patterns to ensure we find it
+    $baseProjectName = "$Project-$Environment"
+    $WordPressContainer = docker ps --format "{{.Names}}" | Where-Object { 
+        $_ -like "*$baseProjectName-wordpress*" -or 
+        $_ -like "*$Project-wordpress*" -or 
+        $_ -like "*wordpress*" 
+    } | Select-Object -First 1
+    
+    if ($WordPressContainer) {
+        Write-Host "Detected WordPress container: $WordPressContainer" -ForegroundColor Cyan
+        
+        # Get the proxy network name directly without calling network-setup.ps1 again
+        # This avoids the environment name duplication issue
+        $proxyNetwork = "proxy-$Project-$Environment"
+        Write-Host "Using proxy network: $proxyNetwork" -ForegroundColor Cyan
+        
+        # Check if WordPress container is already connected to proxy network
+        $isConnected = docker network inspect $proxyNetwork --format '{{range .Containers}}{{.Name}} {{end}}' 2>$null | Select-String -Pattern $WordPressContainer
+        
+        if (-not $isConnected) {
+            Write-Host "Connecting WordPress container to proxy network..." -ForegroundColor Yellow
+            # Create the network if it doesn't exist (will silently continue if it exists)
+            # Check if network exists first to avoid errors
+            $networkExists = docker network ls --format "{{.Name}}" | Select-String -Pattern $proxyNetwork
+            if (-not $networkExists) {
+                docker network create $proxyNetwork 2>$null
+            }
+            # Connect the WordPress container to the proxy network
+            docker network connect $proxyNetwork $WordPressContainer
+            Write-Host "Connected WordPress container to proxy network" -ForegroundColor Green
+        } else {
+            Write-Host "WordPress container already connected to proxy network" -ForegroundColor Green
+        }
+        
+        return $WordPressContainer
+    } else {
+        Write-Host "No WordPress container detected" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# Connect WordPress container to proxy network if it exists
+$WordPressContainer = Connect-WordPressToProxyNetwork -Environment $Environment -Project $Project -DomainBase $DomainBase

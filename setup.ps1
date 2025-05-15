@@ -1087,17 +1087,118 @@ networks:
         Write-Host "Created customized Docker Compose file at $targetDockerCompose" -ForegroundColor Green
 
         # Create .env file
+        # Look for .env.example in the source repository
+        $sourceReposDir = "$PSScriptRoot\source-repos"
+        $envExamplePath = "$sourceReposDir\openemr\.env.example"
         $envFilePath = Join-Path -Path $openemrPath -ChildPath ".env"
-        $envFileContent = @"
+        
+        Write-Host "Looking for OpenEMR .env.example file at: $envExamplePath" -ForegroundColor Yellow
+        
+        if (Test-Path $envExamplePath) {
+            # Use .env.example as a template
+            Write-Host "Found OpenEMR .env.example file, using it as a template" -ForegroundColor Green
+            try {
+                # Read the .env.example file content
+                $envContent = Get-Content -Path $envExamplePath -Raw
+                
+                # Add timestamp and environment information
+                $timestamp = Get-Date -Format "MM/dd/yyyy HH:mm:ss"
+                $envContent = "# Environment file for Official OpenEMR - $Environment`r`n# Generated: $timestamp`r`n$envContent"
+                
+                # Ensure all required variables are set
+                $envContent = $envContent -replace "COMPOSE_PROJECT_NAME=.*", "COMPOSE_PROJECT_NAME=$($envConfig.ProjectName)"
+                
+                # Set HTTP and HTTPS ports
+                if (-not ($envContent -match "HTTP_PORT=")) {
+                    $envContent += "`nHTTP_PORT=$httpPort"
+                } else {
+                    $envContent = $envContent -replace "HTTP_PORT=.*", "HTTP_PORT=$httpPort"
+                }
+                
+                if (-not ($envContent -match "HTTPS_PORT=")) {
+                    $envContent += "`nHTTPS_PORT=$httpsPort"
+                } else {
+                    $envContent = $envContent -replace "HTTPS_PORT=.*", "HTTPS_PORT=$httpsPort"
+                }
+                
+                # Add domain setting if not present
+                if (-not ($envContent -match "DOMAIN=")) {
+                    $envContent += "`r`nDOMAIN=$($envConfig.Domains.openemr)"
+                } else {
+                    $envContent = $envContent -replace "DOMAIN=.*", "DOMAIN=$($envConfig.Domains.openemr)"
+                }
+                
+                # Add telehealth API settings
+                $prefix = if ($Environment -eq "production") { "" } else { "$Environment-" }
+                
+                # Add Telehealth API settings
+                if (-not ($envContent -match "TELEHEALTH_BASE_URL=")) {
+                    $envContent += "`r`nTELEHEALTH_BASE_URL=https://$($envConfig.Domains.telehealth)"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_BASE_URL=.*", "TELEHEALTH_BASE_URL=https://$($envConfig.Domains.telehealth)"
+                }
+                
+                if (-not ($envContent -match "VC_API=")) {
+                    $envContent += "`r`nVC_API=/api/videoconsultation?"
+                } else {
+                    $envContent = $envContent -replace "VC_API=.*", "VC_API=/api/videoconsultation?"
+                }
+                
+                if (-not ($envContent -match "VC_API_DATA=")) {
+                    $envContent += "`r`nVC_API_DATA=/api/videoconsultation/data?"
+                } else {
+                    $envContent = $envContent -replace "VC_API_DATA=.*", "VC_API_DATA=/api/videoconsultation/data?"
+                }
+                
+                if (-not ($envContent -match "TELEHEALTH_PORT=")) {
+                    $envContent += "`r`nTELEHEALTH_PORT=443"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_PORT=.*", "TELEHEALTH_PORT=443"
+                }
+                
+                if (-not ($envContent -match "TELEHEALTH_API_TOKEN=")) {
+                    $envContent += "`r`nTELEHEALTH_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_API_TOKEN=.*", "TELEHEALTH_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
+                }
+                
+                # Write the updated content to the target file
+                Set-Content -Path $envFilePath -Value $envContent -Force
+                Write-Host "Created/Updated .env file at: $envFilePath" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "Error creating .env file from template: $_" -ForegroundColor Red
+                # Fall back to basic template if there's an error
+                CreateBasicEnvFile
+            }
+        }
+        else {
+            # Fall back to basic template if .env.example is not found
+            Write-Host "OpenEMR .env.example file not found, creating a basic one..." -ForegroundColor Yellow
+            CreateBasicEnvFile
+        }
+        
+        # Function to create a basic .env file
+        function CreateBasicEnvFile {
+            $envFileContent = @"
 # Environment file for Official OpenEMR - $Environment
 # Generated: $(Get-Date)
 
 COMPOSE_PROJECT_NAME=$($envConfig.ProjectName)
 HTTP_PORT=$httpPort
 HTTPS_PORT=$httpsPort
+DOMAIN=$($envConfig.Domains.openemr)
+VC_API_URL=https://$($envConfig.Domains.telehealth)
+VC_API=/api/videoconsultation?
+VC_API_DATA=/api/videoconsultation/data?
+VC_API_PORT=443
+VC_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)
 "@
-
-        Set-Content -Path $envFilePath -Value $envFileContent -Force
+            
+            Set-Content -Path $envFilePath -Value $envFileContent -Force
+            Write-Host "Created basic .env file at $envFilePath" -ForegroundColor Green
+        }
+        
         Write-Host "Created .env file at $envFilePath" -ForegroundColor Green
     } else {
         Write-Host "Using existing docker-compose.yml for Official OpenEMR" -ForegroundColor Green
@@ -1348,6 +1449,73 @@ if ($Environment) {
     & "$PSScriptRoot\fix-network-connections.ps1" -Component "jitsi" -SourceReposDir $SourceReposDir -Project $Project
 }
 
+# WordPress Setup
+Write-Host "-----------------" -ForegroundColor Cyan
+Write-Host "WordPress Installation" -ForegroundColor Cyan
+
+# Prompt for WordPress installation
+$installWordPress = Get-UserInput "Do you want to install WordPress for the main site? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+
+if ($installWordPress -eq "y") {
+    Write-Host "Setting up WordPress..." -ForegroundColor Green
+    
+    # Define the WordPress path
+    $wordpressFolder = $envConfig.FolderNames.wordpress
+    $wordpressPath = Join-Path -Path $baseDir -ChildPath "$($envConfig.DirectoryName)\$wordpressFolder"
+
+    if (-not (Test-Path -Path $wordpressPath)) {
+        Write-Host "Creating WordPress directory at: $wordpressPath" -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path $wordpressPath -Force | Out-Null
+    } else {
+        Write-Host "Using WordPress directory at: $wordpressPath" -ForegroundColor Green
+    }
+
+    # Copy docker-compose.yml template
+    Write-Host "Copying WordPress docker-compose.yml template..." -ForegroundColor Yellow
+    Copy-Item "$PSScriptRoot\templates\wordpress\docker-compose.yml" -Destination $wordpressPath -Force
+
+    # Create WordPress .env file
+    Write-Host "Creating WordPress .env file..." -ForegroundColor Yellow
+    $wordpressEnvContent = @"
+# WordPress Environment for $($envConfig.ProjectName)
+# Generated: $(Get-Date -Format "MM/dd/yyyy HH:mm:ss")
+
+COMPOSE_PROJECT_NAME=$($envConfig.ProjectName)-wordpress
+HTTP_PORT=$($envConfig.Config.containerPorts.wordpress.http)
+DB_PORT=$($envConfig.Config.containerPorts.wordpress.db)
+"@
+
+    Set-Content -Path "$wordpressPath\.env" -Value $wordpressEnvContent
+
+    # Check if WordPress containers are already running
+    $existingWordpressContainers = docker ps --format "{{.Names}}" | Where-Object { $_ -match "^$baseProjectName-$wordpressFolder" }
+    if ($existingWordpressContainers) {
+        Write-Host "WordPress containers are already running. Skipping docker-compose up." -ForegroundColor Yellow
+    } else {
+        # Save current location
+        $currentLocation = Get-Location
+        
+        # Change to WordPress directory
+        Set-Location -Path $wordpressPath
+        
+        Write-Host "Starting WordPress containers..." -ForegroundColor Green
+        Invoke-DockerCompose -Command "up -d" -WorkingDirectory (Get-Location).Path
+        
+        # Return to previous location
+        Set-Location -Path $currentLocation
+    }
+    
+    # Configure NPM to route main domain to WordPress
+    Write-Host "Configuring Nginx Proxy Manager to route main domain to WordPress..." -ForegroundColor Yellow
+    # This is now handled automatically in configure-npm.ps1
+    Write-Host "NPM will be configured to route:" -ForegroundColor Green
+    Write-Host "  - Base domain ($DomainBase) to WordPress" -ForegroundColor Green
+    Write-Host "  - $($envConfig.Domains.openemr) to OpenEMR" -ForegroundColor Green
+    Write-Host "  - $($envConfig.Domains.telehealth) to Telehealth" -ForegroundColor Green
+    Write-Host "  - $($envConfig.Domains.jitsi) to Jitsi" -ForegroundColor Green
+} else {
+    Write-Host "Skipping WordPress installation." -ForegroundColor Yellow
+}
 
 # Detect containers using environment-specific patterns
 $OpenEMRContainer = docker ps --format "{{.Names}}" | Where-Object { 
@@ -1567,18 +1735,28 @@ if ($DomainBase -ne "localhost") {
     $envConfig.Domains.openemr = "$prefix-$Project.$DomainBase"
     $envConfig.Domains.telehealth = "vc-$prefix-$Project.$DomainBase"
     $envConfig.Domains.jitsi = "vcbknd-$prefix-$Project.$DomainBase"
+    $envConfig.Domains.wordpress = "$prefix-$Project.$DomainBase"
+    $envConfig.Domains.npm = "npm-$prefix-$Project.$DomainBase"
+
 }
 
 Write-Host "Debug: Resulting domains:" -ForegroundColor Magenta
 Write-Host "  openemr = $($envConfig.Domains.openemr)" -ForegroundColor Magenta
 Write-Host "  telehealth = $($envConfig.Domains.telehealth)" -ForegroundColor Magenta
+Write-Host "  jitsi = $($envConfig.Domains.jitsi)" -ForegroundColor Magenta
+Write-Host "  wordpress = $($envConfig.Domains.wordpress)" -ForegroundColor Magenta
+Write-Host "  npm = $($envConfig.Domains.npm)" -ForegroundColor Magenta
 
 Write-Host "`nAccess Information:" -ForegroundColor Yellow
 # Using consistent domain naming for all URLs
 Write-Host "- OpenEMR Direct Access: http://$($envConfig.Domains.openemr):$($envConfig.ContainerPorts.openemr.http)" -ForegroundColor Green
 Write-Host "- OpenEMR via NPM: https://$($envConfig.Domains.openemr):$($envConfig.NpmPorts.https)" -ForegroundColor Green
 Write-Host "- Telehealth via NPM: https://$($envConfig.Domains.telehealth):$($envConfig.NpmPorts.https)" -ForegroundColor Green
-Write-Host "- Nginx Proxy Manager Admin: http://$($envConfig.Domains.openemr):$($envConfig.NpmPorts.admin)" -ForegroundColor Green
+Write-Host "- Nginx Proxy Manager Admin: http://$($envConfig.Domains.npm):$($envConfig.NpmPorts.admin)" -ForegroundColor Green
+Write-Host "- WordPress: http://$($envConfig.Domains.wordpress):$($envConfig.ContainerPorts.wordpress.http)" -ForegroundColor Green
+Write-Host "- WordPress via NPM: https://$($envConfig.Domains.wordpress):$($envConfig.NpmPorts.https)" -ForegroundColor Green
+Write-Host "- Jitsi: https://$($envConfig.Domains.jitsi):$($envConfig.ContainerPorts.jitsi.http)" -ForegroundColor Green
+Write-Host "- Jitsi via NPM: https://$($envConfig.Domains.jitsi):$($envConfig.NpmPorts.https)" -ForegroundColor Green
 Write-Host "- NPM HTTP Port: $($envConfig.NpmPorts.http)" -ForegroundColor Green
 Write-Host "- NPM HTTPS Port: $($envConfig.NpmPorts.https)" -ForegroundColor Green
 Write-Host ""

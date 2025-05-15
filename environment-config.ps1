@@ -17,6 +17,17 @@ $projectOffsets = @{
     # Add more projects as needed with their respective offsets
 }
 
+# Define display names for projects (used in URLs and display)
+$projectDisplayNames = @{
+    "official" = "notes"  # Use 'notes' instead of 'official' in URLs
+    "aiotp" = "aiotp"    # Keep the same name for other projects
+    "jmdurant" = "jmdurant"
+    # Add more mappings as needed
+}
+
+# Get the display name for the current project (fallback to project name if not in mapping)
+$displayName = if ($projectDisplayNames.ContainsKey($Project)) { $projectDisplayNames[$Project] } else { $Project }
+
 # Base configuration for production environment
 $config = @{
     production = @{
@@ -45,6 +56,11 @@ $config = @{
                 xmpp = "5222"
                 jvb = "10000"
             }
+            wordpress = @{
+                http = "33080"
+                https = "33443"
+                db = "33306"
+            }
         }
         npmPorts = @{
             http = "80"
@@ -55,6 +71,8 @@ $config = @{
             openemr = "localhost"
             telehealth = "vc.localhost"
             jitsi = "vcbknd.localhost"
+            wordpress = "wordpress.localhost"
+            npm = "npm.localhost"
         }
     }
     staging = @{
@@ -77,6 +95,11 @@ $config = @{
                 db_port = "3316"
                 api_token = ""  # Will be set during setup
             }
+            wordpress = @{
+                http = "33090"
+                https = "33453"
+                db = "33316"
+            }
             jitsi = @{
                 http = "32080"
                 https = "32443"
@@ -93,6 +116,8 @@ $config = @{
             openemr = "staging.localhost"
             telehealth = "vc-staging.localhost"
             jitsi = "vcbknd-staging.localhost"
+            wordpress = "staging-wordpress.localhost"
+            npm = "staging-npm.localhost"
         }
     }
     dev = @{
@@ -131,6 +156,8 @@ $config = @{
             openemr = "dev.localhost"
             telehealth = "vc-dev.localhost"
             jitsi = "vcbknd-dev.localhost"
+            wordpress = "dev-wordpress.localhost"
+            npm = "dev-npm.localhost"
         }
     }
     test = @{
@@ -169,6 +196,8 @@ $config = @{
             openemr = "test.localhost"
             telehealth = "vc-test.localhost"
             jitsi = "vcbknd-test.localhost"
+            wordpress = "test-wordpress.localhost"
+            npm = "test-npm.localhost"
         }
     }
 }
@@ -198,15 +227,16 @@ if ($Project -ne "aiotp") {
 
 # Always modify domain names based on DomainBase parameter, regardless of project
 # This ensures custom domains work for all projects
+# Use $displayName instead of $Project for domain names to allow for custom display names
 if ($Environment -eq "production") {
-    $config[$Environment].domains.openemr = "$Project.$DomainBase"
-    $config[$Environment].domains.telehealth = "vc-$Project.$DomainBase"
-    $config[$Environment].domains.jitsi = "vcbknd-$Project.$DomainBase"
+    $config[$Environment].domains.openemr = "$displayName.$DomainBase"
+    $config[$Environment].domains.telehealth = "vc.$DomainBase"
+    $config[$Environment].domains.jitsi = "vcbknd.$DomainBase"
 } else {
     $prefix = $Environment.ToLower()
-    $config[$Environment].domains.openemr = "$prefix-$Project.$DomainBase"
-    $config[$Environment].domains.telehealth = "vc-$prefix-$Project.$DomainBase"
-    $config[$Environment].domains.jitsi = "vcbknd-$prefix-$Project.$DomainBase"
+    $config[$Environment].domains.openemr = "$prefix-$displayName.$DomainBase"
+    $config[$Environment].domains.telehealth = "vc-$prefix.$DomainBase"
+    $config[$Environment].domains.jitsi = "vcbknd-$prefix.$DomainBase"
 }
 
 # Folder names for components (consistent across all environments)
@@ -215,6 +245,7 @@ $folderNames = @{
     telehealth = "telehealth"
     jitsi = "jitsi-docker"
     proxy = "proxy"
+    wordpress = "wordpress"
 }
 
 # Network names based on environment and project
