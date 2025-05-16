@@ -118,19 +118,163 @@ if [ ! -z "$JITSI_CONTAINER" ]; then
     docker network connect $PROXY_NETWORK $JITSI_CONTAINER 2>/dev/null || echo "Jitsi already connected to proxy network"
 fi
 
-# Step 8: Display access information
-echo "Step 8: Setup Complete"
+# Step 8: Configure Nginx Proxy Manager
+echo "Step 8: Configuring Nginx Proxy Manager..."
+echo "-----------------------------------"
+
+# NPM API credentials
+NPM_EMAIL="admin@example.com"
+NPM_PASSWORD="changeme"
+NPM_ADMIN_PORT=$(grep ADMIN_PORT proxy/.env | cut -d= -f2 || echo "81")
+NPM_URL="http://localhost:${NPM_ADMIN_PORT}"
+
+# Wait for NPM to be fully started
+echo "Waiting for NPM API to be available..."
+sleep 10
+
+# Function to authenticate with NPM API
+get_npm_token() {
+    echo "Authenticating with NPM API..."
+    
+    # Try to log in and get token
+    TOKEN_RESPONSE=$(curl -s -X POST "${NPM_URL}/api/tokens" \
+        -H "Content-Type: application/json" \
+        -d '{"identity":"'"${NPM_EMAIL}"'","secret":"'"${NPM_PASSWORD}"'"}' \
+        --retry 5 --retry-delay 2)
+    
+    # Extract token from response
+    TOKEN=$(echo $TOKEN_RESPONSE | grep -o '"token":"[^"]*"' | cut -d\" -f4)
+    
+    if [ -z "$TOKEN" ]; then
+        echo "Failed to authenticate with NPM API. Using default credentials..."
+        # Try with default credentials
+        DEFAULT_RESPONSE=$(curl -s -X POST "${NPM_URL}/api/tokens" \
+            -H "Content-Type: application/json" \
+            -d '{"identity":"admin@example.com","secret":"changeme"}' \
+            --retry 5 --retry-delay 2)
+        
+        TOKEN=$(echo $DEFAULT_RESPONSE | grep -o '"token":"[^"]*"' | cut -d\" -f4)
+    fi
+    
+    echo "$TOKEN"
+}
+
+# Function to create a proxy host
+create_proxy_host() {
+    local TOKEN=$1
+    local DOMAIN=$2
+    local FORWARD_HOST=$3
+    local FORWARD_PORT=$4
+    local WEBSOCKET=${5:-false}
+    
+    echo "Creating proxy host for domain: $DOMAIN -> $FORWARD_HOST:$FORWARD_PORT"
+    
+    # Check if proxy host already exists
+    EXISTING=$(curl -s -X GET "${NPM_URL}/api/nginx/proxy-hosts" \
+        -H "Authorization: Bearer $TOKEN")
+    
+    DOMAIN_EXISTS=$(echo $EXISTING | grep -o "\"domain_names\":\[\"$DOMAIN\"\]")
+    
+    if [ ! -z "$DOMAIN_EXISTS" ]; then
+        echo "Proxy host for $DOMAIN already exists. Skipping."
+        return 0
+    fi
+    
+    # Create proxy host
+    RESPONSE=$(curl -s -X POST "${NPM_URL}/api/nginx/proxy-hosts" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "domain_names": ["'"$DOMAIN"'"],
+            "forward_host": "'"$FORWARD_HOST"'",
+            "forward_port": '$FORWARD_PORT',
+            "access_list_id": "0",
+            "certificate_id": 1,
+            "ssl_forced": true,
+            "http2_support": true,
+            "meta": {
+                "letsencrypt_agree": false,
+                "dns_challenge": false
+            },
+            "advanced_config": "",
+            "block_exploits": true,
+            "caching_enabled": false,
+            "allow_websocket_upgrade": '"$WEBSOCKET"',
+            "http2_push_preload": false,
+            "hsts_enabled": false,
+            "hsts_subdomains": false
+        }')
+    
+    if echo $RESPONSE | grep -q "id"; then
+        echo "Successfully created proxy host for $DOMAIN"
+        return 0
+    else
+        echo "Failed to create proxy host for $DOMAIN"
+        echo "Response: $RESPONSE"
+        return 1
+    fi
+}
+
+# Get NPM authentication token
+NPM_TOKEN=$(get_npm_token)
+
+if [ -z "$NPM_TOKEN" ]; then
+    echo "Failed to authenticate with NPM API. Proxy hosts will not be configured."
+else
+    echo "Successfully authenticated with NPM API."
+    
+    # Set domain names based on environment
+    if [ "$ENVIRONMENT" = "production" ]; then
+        OPENEMR_DOMAIN="$PROJECT_NAME.localhost"
+        TELEHEALTH_DOMAIN="vc.$PROJECT_NAME.localhost"
+        JITSI_DOMAIN="vcbknd.$PROJECT_NAME.localhost"
+        WORDPRESS_DOMAIN="$PROJECT_NAME.localhost"
+    else
+        OPENEMR_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.localhost"
+        TELEHEALTH_DOMAIN="vc-$ENVIRONMENT.localhost"
+        JITSI_DOMAIN="vcbknd-$ENVIRONMENT.localhost"
+        WORDPRESS_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.localhost"
+    fi
+    
+    # Create proxy hosts for each service
+    if [ ! -z "$OPENEMR_CONTAINER" ]; then
+        create_proxy_host "$NPM_TOKEN" "$OPENEMR_DOMAIN" "$OPENEMR_CONTAINER" 80 false
+    fi
+    
+    if [ ! -z "$TELEHEALTH_CONTAINER" ]; then
+        create_proxy_host "$NPM_TOKEN" "$TELEHEALTH_DOMAIN" "$TELEHEALTH_CONTAINER" 80 false
+    fi
+    
+    if [ ! -z "$JITSI_CONTAINER" ]; then
+        create_proxy_host "$NPM_TOKEN" "$JITSI_DOMAIN" "$JITSI_CONTAINER" 80 true
+    fi
+    
+    if [ ! -z "$WORDPRESS_CONTAINER" ]; then
+        create_proxy_host "$NPM_TOKEN" "$WORDPRESS_DOMAIN" "$WORDPRESS_CONTAINER" 80 false
+    fi
+    
+    echo "NPM proxy hosts configuration complete!"
+fi
+
+# Step 9: Display access information
+echo "Step 9: Setup Complete"
 echo "-------------------"
 echo "The All-In-One Telehealth Platform deployment is complete!"
 echo ""
 echo "Access Information:"
-echo "- OpenEMR: http://localhost:$(grep HTTP_PORT openemr/.env | cut -d= -f2)"
-echo "- Nginx Proxy Manager Admin: http://localhost:$(grep ADMIN_PORT proxy/.env | cut -d= -f2 || echo "81")"
-echo "- WordPress: http://localhost:$(grep HTTP_PORT wordpress/.env | cut -d= -f2 || echo "33080")"
+echo "- OpenEMR Direct: http://localhost:$(grep HTTP_PORT openemr/.env | cut -d= -f2)"
+echo "- OpenEMR via NPM: https://$OPENEMR_DOMAIN"
+echo "- Telehealth via NPM: https://$TELEHEALTH_DOMAIN"
+echo "- Jitsi via NPM: https://$JITSI_DOMAIN"
+echo "- WordPress Direct: http://localhost:$(grep HTTP_PORT wordpress/.env | cut -d= -f2 || echo "33080")"
+echo "- WordPress via NPM: https://$WORDPRESS_DOMAIN"
+echo "- Nginx Proxy Manager Admin: http://localhost:$NPM_ADMIN_PORT"
 echo ""
 echo "Important notes:"
-echo "- Configure proxy hosts in Nginx Proxy Manager to access services via domains"
+echo "- Default NPM login: admin@example.com / changeme"
 echo "- Default OpenEMR login: admin / AdminOps2023**"
+echo "- Add the following entries to your /etc/hosts file:"
+echo "  127.0.0.1 $OPENEMR_DOMAIN $TELEHEALTH_DOMAIN $JITSI_DOMAIN $WORDPRESS_DOMAIN"
 echo ""
 echo "Thank you for using the All-In-One Telehealth Platform!"
 
