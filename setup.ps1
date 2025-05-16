@@ -2205,6 +2205,21 @@ function Zip-Deployment {
         Write-Host "Archive location: $zipFilePath" -ForegroundColor Green
         Write-Host "You can use this archive to transfer the deployment to another server." -ForegroundColor Green
         
+        # Display deployment instructions
+        Write-Host "`nDeployment Instructions:" -ForegroundColor Cyan
+        Write-Host "--------------------" -ForegroundColor Cyan
+        Write-Host "1. Copy the zip file to your remote server:" -ForegroundColor White
+        Write-Host "   scp $zipFileName username@remote-server:/path/to/destination/" -ForegroundColor Yellow
+        Write-Host "`n2. On the remote server, extract the archive:" -ForegroundColor White
+        Write-Host "   unzip $zipFileName" -ForegroundColor Yellow
+        Write-Host "`n3. Navigate to the extracted directory:" -ForegroundColor White
+        Write-Host "   cd $deploymentFolder" -ForegroundColor Yellow
+        Write-Host "`n4. Make the startup script executable:" -ForegroundColor White
+        Write-Host "   chmod +x start-deployment.sh" -ForegroundColor Yellow
+        Write-Host "`n5. Run the deployment script:" -ForegroundColor White
+        Write-Host "   ./start-deployment.sh" -ForegroundColor Yellow
+        Write-Host "`nThe script will create all necessary networks, start containers, and connect them properly." -ForegroundColor White
+        
         # Restart any containers that were stopped for zip creation
         if ($global:stoppedContainers -and $global:stoppedContainers.Count -gt 0) {
             Write-Host "Restarting containers that were stopped for zip creation..." -ForegroundColor Yellow
