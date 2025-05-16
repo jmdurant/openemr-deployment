@@ -2172,8 +2172,29 @@ function Zip-Deployment {
         # Only include the deployment folder in the zip archive
         $fullPathToZip = Join-Path $PSScriptRoot $deploymentFolder
         
-        # Create zip archive with just the deployment folder
-        Write-Host "Creating zip archive with only the deployment folder..." -ForegroundColor Green
+        # Copy the start-deployment.sh script to the deployment folder
+        $startupScriptSource = Join-Path $PSScriptRoot "templates\start-deployment.sh"
+        $startupScriptDest = Join-Path $fullPathToZip "start-deployment.sh"
+        
+        if (Test-Path -Path $startupScriptSource) {
+            Write-Host "Copying startup script to deployment folder..." -ForegroundColor Green
+            Copy-Item -Path $startupScriptSource -Destination $startupScriptDest -Force
+            
+            # Ensure the script has Unix-style line endings (LF instead of CRLF)
+            $content = Get-Content -Path $startupScriptDest -Raw
+            $content = $content -replace "`r`n", "`n"
+            [System.IO.File]::WriteAllText($startupScriptDest, $content)
+            
+            # Make the script executable (this won't have effect on Windows but will be preserved in the zip)
+            if ($IsLinux -or $IsMacOS) {
+                chmod +x $startupScriptDest
+            }
+        } else {
+            Write-Host "Warning: Startup script template not found at $startupScriptSource" -ForegroundColor Yellow
+        }
+        
+        # Create zip archive with the deployment folder
+        Write-Host "Creating zip archive with the deployment folder..." -ForegroundColor Green
         Compress-Archive -Path $fullPathToZip -DestinationPath $zipFilePath -Force
         
         # Get the size of the zip file
