@@ -2,9 +2,15 @@
 # Deployment Startup Script for All-In-One Telehealth Platform
 # This script starts all components and ensures proper network connections
 
-# Set environment variables
-PROJECT_NAME=$(basename $(pwd))
-ENVIRONMENT=${1:-"staging"}  # Default to staging if not specified
+# Environment-specific variables (will be replaced during deployment)
+DOMAIN_BASE="__DOMAIN_BASE__"
+PROJECT_NAME="__PROJECT_NAME__"
+ENVIRONMENT="__ENVIRONMENT__"
+NPM_ADMIN_PORT="__NPM_ADMIN_PORT__"
+NPM_HTTP_PORT="__NPM_HTTP_PORT__"
+NPM_HTTPS_PORT="__NPM_HTTPS_PORT__"
+
+# Set network names
 PROXY_NETWORK="proxy-$PROJECT_NAME"
 FRONTEND_NETWORK="frontend-$PROJECT_NAME"
 SHARED_NETWORK="${PROJECT_NAME}-shared-network"
@@ -125,7 +131,6 @@ echo "-----------------------------------"
 # NPM API credentials
 NPM_EMAIL="admin@example.com"
 NPM_PASSWORD="changeme"
-NPM_ADMIN_PORT=$(grep ADMIN_PORT proxy/.env | cut -d= -f2 || echo "81")
 NPM_URL="http://localhost:${NPM_ADMIN_PORT}"
 
 # Wait for NPM to be fully started
@@ -223,17 +228,17 @@ if [ -z "$NPM_TOKEN" ]; then
 else
     echo "Successfully authenticated with NPM API."
     
-    # Set domain names based on environment
+    # Set domain names based on environment and domain base
     if [ "$ENVIRONMENT" = "production" ]; then
-        OPENEMR_DOMAIN="$PROJECT_NAME.localhost"
-        TELEHEALTH_DOMAIN="vc.$PROJECT_NAME.localhost"
-        JITSI_DOMAIN="vcbknd.$PROJECT_NAME.localhost"
-        WORDPRESS_DOMAIN="$PROJECT_NAME.localhost"
+        OPENEMR_DOMAIN="$PROJECT_NAME.$DOMAIN_BASE"
+        TELEHEALTH_DOMAIN="vc.$PROJECT_NAME.$DOMAIN_BASE"
+        JITSI_DOMAIN="vcbknd.$PROJECT_NAME.$DOMAIN_BASE"
+        WORDPRESS_DOMAIN="$PROJECT_NAME.$DOMAIN_BASE"
     else
-        OPENEMR_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.localhost"
-        TELEHEALTH_DOMAIN="vc-$ENVIRONMENT.localhost"
-        JITSI_DOMAIN="vcbknd-$ENVIRONMENT.localhost"
-        WORDPRESS_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.localhost"
+        OPENEMR_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.$DOMAIN_BASE"
+        TELEHEALTH_DOMAIN="vc-$ENVIRONMENT.$DOMAIN_BASE"
+        JITSI_DOMAIN="vcbknd-$ENVIRONMENT.$DOMAIN_BASE"
+        WORDPRESS_DOMAIN="$ENVIRONMENT-$PROJECT_NAME.$DOMAIN_BASE"
     fi
     
     # Create proxy hosts for each service
@@ -273,8 +278,8 @@ echo ""
 echo "Important notes:"
 echo "- Default NPM login: admin@example.com / changeme"
 echo "- Default OpenEMR login: admin / AdminOps2023**"
-echo "- Add the following entries to your /etc/hosts file:"
-echo "  127.0.0.1 $OPENEMR_DOMAIN $TELEHEALTH_DOMAIN $JITSI_DOMAIN $WORDPRESS_DOMAIN"
+echo "- Add the following entries to your /etc/hosts file (or DNS):"
+echo "  <YOUR_SERVER_IP> $OPENEMR_DOMAIN $TELEHEALTH_DOMAIN $JITSI_DOMAIN $WORDPRESS_DOMAIN"
 echo ""
 echo "Thank you for using the All-In-One Telehealth Platform!"
 

@@ -2172,18 +2172,43 @@ function Zip-Deployment {
         # Only include the deployment folder in the zip archive
         $fullPathToZip = Join-Path $PSScriptRoot $deploymentFolder
         
-        # Copy the start-deployment.sh script to the deployment folder
+        # Copy and customize the start-deployment.sh script for the deployment folder
         $startupScriptSource = Join-Path $PSScriptRoot "templates\start-deployment.sh"
         $startupScriptDest = Join-Path $fullPathToZip "start-deployment.sh"
         
         if (Test-Path -Path $startupScriptSource) {
-            Write-Host "Copying startup script to deployment folder..." -ForegroundColor Green
-            Copy-Item -Path $startupScriptSource -Destination $startupScriptDest -Force
+            Write-Host "Customizing startup script for deployment..." -ForegroundColor Green
+            
+            # Read the template content
+            $content = Get-Content -Path $startupScriptSource -Raw
+            
+            # Get environment configuration
+            if (-not $envConfig) {
+                Write-Host "Loading environment configuration for script customization..." -ForegroundColor Yellow
+                $envConfig = . "$PSScriptRoot\environment-config.ps1" -Environment $Environment -Project $ProjectName -DomainBase $DomainBase
+            }
+            
+            # Replace placeholder variables with actual values
+            $content = $content -replace "__DOMAIN_BASE__", $DomainBase
+            $content = $content -replace "__PROJECT_NAME__", $ProjectName
+            $content = $content -replace "__ENVIRONMENT__", $Environment
+            $content = $content -replace "__NPM_ADMIN_PORT__", $envConfig.NpmPorts.admin
+            $content = $content -replace "__NPM_HTTP_PORT__", $envConfig.NpmPorts.http
+            $content = $content -replace "__NPM_HTTPS_PORT__", $envConfig.NpmPorts.https
             
             # Ensure the script has Unix-style line endings (LF instead of CRLF)
-            $content = Get-Content -Path $startupScriptDest -Raw
             $content = $content -replace "`r`n", "`n"
+            
+            # Write the customized content to the destination file
             [System.IO.File]::WriteAllText($startupScriptDest, $content)
+            
+            Write-Host "Startup script customized with the following values:" -ForegroundColor Green
+            Write-Host "  - Domain Base: $DomainBase" -ForegroundColor Green
+            Write-Host "  - Project Name: $ProjectName" -ForegroundColor Green
+            Write-Host "  - Environment: $Environment" -ForegroundColor Green
+            Write-Host "  - NPM Admin Port: $($envConfig.NpmPorts.admin)" -ForegroundColor Green
+            Write-Host "  - NPM HTTP Port: $($envConfig.NpmPorts.http)" -ForegroundColor Green
+            Write-Host "  - NPM HTTPS Port: $($envConfig.NpmPorts.https)" -ForegroundColor Green
             
             # Make the script executable (this won't have effect on Windows but will be preserved in the zip)
             if ($IsLinux -or $IsMacOS) {
