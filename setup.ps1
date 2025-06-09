@@ -37,6 +37,11 @@ $script:DevMode = $Environment -eq "dev"
 Write-Host "DevMode is $(if ($script:DevMode) { "enabled" } else { "disabled" }) for $Environment environment" -ForegroundColor $(if ($script:DevMode) { "Green" } else { "Yellow" })
 Write-Host "ARM mode is $(if ($ARM) { "enabled" } else { "disabled" })" -ForegroundColor $(if ($ARM) { "Green" } else { "Yellow" })
 
+# Define deployment folder path early to avoid null reference errors
+$deploymentFolder = "$Project-$Environment"
+$deploymentFolderPath = Join-Path $PSScriptRoot $deploymentFolder
+Write-Host "Using deployment folder path: $deploymentFolderPath" -ForegroundColor Cyan
+
 # Function definitions
 function Handle-AllVolumes {
     param (
@@ -643,7 +648,7 @@ Write-Host "This will eliminate warnings in the logs." -ForegroundColor Green
 Write-Host ""
 
 # Option to prune all images
-$pruneImages = Get-UserInput "Do you want to prune all Docker images? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+$pruneImages = Get-UserInput "Do you want to prune all Docker images? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "n"
 if ($pruneImages -eq "y") {
     Write-Host "Pruning all Docker images..." -ForegroundColor Yellow
     docker image prune -a -f
@@ -754,6 +759,9 @@ if (Test-ScriptExists -ScriptName "generate-certs.ps1") {
                 $cmd += " -Environment $Environment"
             }
             $cmd += " -Project $Project -SourceReposDir `"$SourceReposDir`""
+            if ($DomainBase) {
+                $cmd += " -DomainBase $DomainBase"
+            }
             $cmd += " -Force"
             
             Write-Host "Running: $cmd" -ForegroundColor Yellow
@@ -861,16 +869,16 @@ if ($runSetupTelehealth -eq "y") {
     docker exec -it $baseProjectName-$telehealthFolder-app-1 composer install --working-dir=/var/www
     
     Write-Host "Generating application key..." -ForegroundColor Green
-    docker exec -it $baseProjectName-$telehealthFolder-app-1 php /var/www/artisan key:generate
+    docker exec -it $baseProjectName-$telehealthFolder-app-1 php /var/www/artisan key:generate --force
     
     Write-Host "Running database migrations..." -ForegroundColor Green
-    docker exec -it $baseProjectName-$telehealthFolder-app-1 php /var/www/artisan migrate
+    docker exec -it $baseProjectName-$telehealthFolder-app-1 bash -c "echo 'yes' | php /var/www/artisan migrate --force"
     
     Write-Host "Running database seeding..." -ForegroundColor Green
-    docker exec -it $baseProjectName-$telehealthFolder-app-1 php /var/www/artisan db:seed
+    docker exec -it $baseProjectName-$telehealthFolder-app-1 bash -c "echo 'yes' | php /var/www/artisan db:seed --force"
     
     Write-Host "Generating API token..." -ForegroundColor Green
-    $rawToken = docker exec -it $baseProjectName-$telehealthFolder-app-1 php /var/www/artisan token:issue
+    $rawToken = docker exec -it $baseProjectName-$telehealthFolder-app-1 bash -c "echo 'yes' | php /var/www/artisan token:issue"
     # Extract just the token part (everything after the last space)
     $token = $rawToken -split " " | Select-Object -Last 1
     # Remove any ANSI color codes and extra characters
@@ -915,6 +923,13 @@ if ($runSetupTelehealth -eq "y") {
     Write-Host "Telehealth Database Setup not completed." -ForegroundColor Cyan
 }
 
+# Fix network connections to ensure all containers are properly connected
+Write-Host "Fixing network connections for OpenEMR containers..." -ForegroundColor Yellow
+if ($Environment) {
+    & "$PSScriptRoot\fix-network-connections.ps1" -Environment $Environment -Component "telehealth" -SourceReposDir $SourceReposDir -Project $Project
+} else {
+    & "$PSScriptRoot\fix-network-connections.ps1" -Component "telehealth" -SourceReposDir $SourceReposDir -Project $Project
+}
 
 # Setup OpenEMR
 Write-Host "Step 4: OpenEMR Setup" -ForegroundColor Cyan
@@ -1071,6 +1086,63 @@ if ($Project -eq "official") {
         # Add project name to prevent conflicts
         $dockerComposeContent = "# Docker Compose for Official OpenEMR - $Environment`n`nversion: '3.1'`nname: $($envConfig.ProjectName)`n" + ($dockerComposeContent -replace "version: '3.1'", "")
 
+        # Add Telehealth environment variables to the openemr service
+        $lines = $dockerComposeContent -split "`n"
+        $openemrServiceIndex = -1
+        $environmentIndex = -1
+        
+        # Find the openemr service and its environment section
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^\s+openemr:") {
+                $openemrServiceIndex = $i
+            }
+            if ($openemrServiceIndex -ne -1 -and $lines[$i] -match "^\s+environment:") {
+                $environmentIndex = $i
+                break
+            }
+        }
+        
+        # If we found the environment section, add our variables after the last environment variable
+        if ($environmentIndex -ne -1) {
+            $lastEnvVarIndex = $environmentIndex
+            $indentation = ""
+            
+            # Find the last environment variable and its indentation
+            for ($i = $environmentIndex + 1; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match "^(\s+)\S+:" -and $lines[$i-1] -match "^\s+\S+: \S+") {
+                    # This line has different indentation, so we've moved past the environment section
+                    break
+                }
+                if ($lines[$i] -match "^(\s+)(\S+): \S+") {
+                    $lastEnvVarIndex = $i
+                    $indentation = $matches[1]
+                }
+            }
+            
+            # Add our Telehealth variables after the last environment variable with the same indentation
+            $teleHealthVars = @(
+                "$($indentation)TELEHEALTH_EXTERNAL_URL: `${TELEHEALTH_EXTERNAL_URL}",
+                "$($indentation)TELEHEALTH_EXTERNAL_HTTPS_URL: `${TELEHEALTH_EXTERNAL_HTTPS_URL}",
+                "$($indentation)TELEHEALTH_API_TOKEN: `${TELEHEALTH_API_TOKEN}",
+                "$($indentation)NOTIFICATION_TOKEN: `${NOTIFICATION_TOKEN}",
+                "$($indentation)TELEHEALTH_BASE_URL: `${TELEHEALTH_BASE_URL}",
+                "$($indentation)VC_API: `${VC_API}",
+                "$($indentation)VC_API_DATA: `${VC_API_DATA}",
+                "$($indentation)TELEHEALTH_PORT: `${TELEHEALTH_PORT}",
+                "$($indentation)VC_API_URL: `${VC_API_URL}",
+                "$($indentation)VC_API_TOKEN: `${VC_API_TOKEN}",
+                "$($indentation)VC_API_PORT: `${VC_API_PORT}",
+                "$($indentation)OPS_DB_HOST: `${OPS_DB_HOST}",
+                "$($indentation)OPS_DB_USER: `${OPS_DB_USER}",
+                "$($indentation)OPS_DB_PASSWORD: `${OPS_DB_PASSWORD}",
+                "$($indentation)OPS_DB_DATABASE: `${OPS_DB_DATABASE}",
+                "$($indentation)OPS_NOTIFICATIONS_ENDPOINT: `${OPS_NOTIFICATIONS_ENDPOINT}"
+            ) 
+            
+            $lines = $lines[0..$lastEnvVarIndex] + $teleHealthVars + $lines[($lastEnvVarIndex+1)..($lines.Count-1)]
+            $dockerComposeContent = $lines -join "`n"
+        }
+        
         # Add network configuration
         $networksConfig = @"
 
@@ -1138,6 +1210,31 @@ networks:
                     $envContent = $envContent -replace "TELEHEALTH_BASE_URL=.*", "TELEHEALTH_BASE_URL=https://$($envConfig.Domains.telehealth)"
                 }
                 
+                # Add Telehealth API settings
+                if (-not ($envContent -match "TELEHEALTH_PORT=")) {
+                    $envContent += "`r`nTELEHEALTH_PORT=443"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_PORT=.*", "TELEHEALTH_PORT=443"
+                }
+                
+                #if (-not ($envContent -match "TELEHEALTH_BASE_URL=")) {
+                #    $envContent += "`r`nTELEHEALTH_BASE_URL=http://$Project-$Environment-telehealth-web-1:\${TELEHEALTH_PORT}"
+                #} else {
+                #    $envContent = $envContent -replace "TELEHEALTH_BASE_URL=.*", "TELEHEALTH_BASE_URL=http://$Project-$Environment-telehealth-web-1:\${TELEHEALTH_PORT}"
+                #}
+
+                if (-not ($envContent -match "VC_API_URL=")) {
+                    $envContent += "`r`nVC_API_URL=https://$($envConfig.Domains.telehealth)"
+                } else {
+                    $envContent = $envContent -replace "VC_API_URL=.*", "VC_API_URL=https://$($envConfig.Domains.telehealth)"
+                }
+
+                #if (-not ($envContent -match "VC_API_URL=")) {
+                #    $envContent += "`r`nVC_API_URL=http://$Project-$Environment-telehealth-web-1:\${VC_API_PORT}"
+                #} else {
+                #    $envContent = $envContent -replace "VC_API_URL=.*", "VC_API_URL=http://$Project-$Environment-telehealth-web-1:\${VC_API_PORT}"
+                #}
+                
                 if (-not ($envContent -match "VC_API=")) {
                     $envContent += "`r`nVC_API=/api/videoconsultation?"
                 } else {
@@ -1155,13 +1252,73 @@ networks:
                 } else {
                     $envContent = $envContent -replace "TELEHEALTH_PORT=.*", "TELEHEALTH_PORT=443"
                 }
-                
+                if (-not ($envContent -match "VC_API_PORT=")) {
+                    $envContent += "`r`nVC_API_PORT=443"
+                } else {
+                    $envContent = $envContent -replace "VC_API_PORT=.*", "VC_API_PORT=443"
+                }
                 if (-not ($envContent -match "TELEHEALTH_API_TOKEN=")) {
                     $envContent += "`r`nTELEHEALTH_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
                 } else {
                     $envContent = $envContent -replace "TELEHEALTH_API_TOKEN=.*", "TELEHEALTH_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
                 }
+                if (-not ($envContent -match "VC_API_TOKEN=")) {
+                    $envContent += "`r`nVC_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
+                } else {
+                    $envContent = $envContent -replace "VC_API_TOKEN=.*", "VC_API_TOKEN=$($envConfig.Config.containerPorts.telehealth.api_token)"
+                }
                 
+                # Add database connection settings
+                if (-not ($envContent -match "OPS_DB_HOST=")) {
+                    $envContent += "`r`nOPS_DB_HOST=localhost"
+                } else {
+                    $envContent = $envContent -replace "OPS_DB_HOST=.*", "OPS_DB_HOST=localhost"
+                }
+                
+                if (-not ($envContent -match "OPS_DB_USER=")) {
+                    $envContent += "`r`nOPS_DB_USER=openemr"
+                } else {
+                    $envContent = $envContent -replace "OPS_DB_USER=.*", "OPS_DB_USER=openemr"
+                }
+                
+                if (-not ($envContent -match "OPS_DB_PASSWORD=")) {
+                    $envContent += "`r`nOPS_DB_PASSWORD=openemr"
+                } else {
+                    $envContent = $envContent -replace "OPS_DB_PASSWORD=.*", "OPS_DB_PASSWORD=openemr"
+                }
+                
+                if (-not ($envContent -match "OPS_DB_DATABASE=")) {
+                    $envContent += "`r`nOPS_DB_DATABASE=openemr"
+                } else {
+                    $envContent = $envContent -replace "OPS_DB_DATABASE=.*", "OPS_DB_DATABASE=openemr"
+                }
+                
+                if (-not ($envContent -match "OPS_NOTIFICATIONS_ENDPOINT=")) {
+                    $envContent += "`r`nOPS_NOTIFICATIONS_ENDPOINT="
+                } else {
+                    $envContent = $envContent -replace "OPS_NOTIFICATIONS_ENDPOINT=.*", "OPS_NOTIFICATIONS_ENDPOINT=http://$Project-$Environment-openemr-1:$($envConfig.Config.containerPorts.npm.http)/interface/modules/custom_modules/oe-telehealth-module/api/notifications_simple.php"
+                }
+                
+                if (-not ($envContent -match "NOTIFICATION_TOKEN=")) {
+                    $envContent += "`r`nNOTIFICATION_TOKEN=openemr-telehealth-secret-2024"
+                } else {
+                    $envContent = $envContent -replace "NOTIFICATION_TOKEN=.*", "NOTIFICATION_TOKEN=openemr-telehealth-secret-2024"
+                }
+                
+                # Add Telehealth external URL if not present
+                if (-not ($envContent -match "TELEHEALTH_EXTERNAL_URL=")) {
+                    $envContent += "`r`nTELEHEALTH_EXTERNAL_URL=http://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.web)"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_EXTERNAL_URL=.*", "TELEHEALTH_EXTERNAL_URL=http://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.web)"
+                }
+                
+                # Add Telehealth external HTTPS URL if not present
+                if (-not ($envContent -match "TELEHEALTH_EXTERNAL_HTTPS_URL=")) {
+                    $envContent += "`r`nTELEHEALTH_EXTERNAL_HTTPS_URL=https://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.https)"
+                } else {
+                    $envContent = $envContent -replace "TELEHEALTH_EXTERNAL_HTTPS_URL=.*", "TELEHEALTH_EXTERNAL_HTTPS_URL=https://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.https)"
+                }
+
                 # Write the updated content to the target file
                 Set-Content -Path $envFilePath -Value $envContent -Force
                 Write-Host "Created/Updated .env file at: $envFilePath" -ForegroundColor Green
@@ -1483,6 +1640,7 @@ if ($installWordPress -eq "y") {
 COMPOSE_PROJECT_NAME=$($envConfig.ProjectName)-wordpress
 HTTP_PORT=$($envConfig.Config.containerPorts.wordpress.http)
 DB_PORT=$($envConfig.Config.containerPorts.wordpress.db)
+PROJECT_NAME=$($envConfig.ProjectName)
 "@
 
     Set-Content -Path "$wordpressPath\.env" -Value $wordpressEnvContent
@@ -1500,6 +1658,162 @@ DB_PORT=$($envConfig.Config.containerPorts.wordpress.db)
         
         Write-Host "Starting WordPress containers..." -ForegroundColor Green
         Invoke-DockerCompose -Command "up -d" -WorkingDirectory (Get-Location).Path
+        
+        # Wait a moment for the container to start
+        Start-Sleep -Seconds 5
+        
+        # Copy the theme download script to the WordPress container
+        $wordpressContainer = "$baseProjectName-$wordpressFolder-wordpress-1"
+        Write-Host "Installing default WordPress themes..." -ForegroundColor Green
+        
+        # Create themes directory if it doesn't exist
+        if (-not (Test-Path -Path "$wordpressPath\themes")) {
+            New-Item -ItemType Directory -Path "$wordpressPath\themes" -Force | Out-Null
+        }
+        
+        # Check if the medical theme repository exists in source-repos
+        $medicalThemeSourceDir = "$PSScriptRoot\source-repos\development-medical-theme"
+        if (Test-Path -Path $medicalThemeSourceDir) {
+            Write-Host "Found medical theme repository at: $medicalThemeSourceDir" -ForegroundColor Green
+            
+            # Copy the medical theme to the WordPress themes directory
+            Write-Host "Copying medical theme to WordPress themes directory..." -ForegroundColor Yellow
+            $medicalThemeTargetDir = "$wordpressPath\themes\medical-theme"
+            
+            # Create the target directory if it doesn't exist
+            if (-not (Test-Path -Path $medicalThemeTargetDir)) {
+                New-Item -ItemType Directory -Path $medicalThemeTargetDir -Force | Out-Null
+            }
+            
+            # Function to selectively copy WordPress theme files
+            function Copy-WordPressThemeFiles {
+                param (
+                    [string]$SourceDir,
+                    [string]$TargetDir
+                )
+                
+                # Create target directory if it doesn't exist
+                if (-not (Test-Path -Path $TargetDir)) {
+                    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+                }
+                
+                # Define files and directories to include
+                $includePaths = @(
+                    # PHP files
+                    "*.php",
+                    # CSS files
+                    "*.css",
+                    # Built JavaScript
+                    "assets\js-build\*",
+                    # Images
+                    "assets\images\*",
+                    # Fonts
+                    "assets\fonts\*",
+                    # Theme configuration
+                    "theme.json",
+                    "screenshot.png",
+                    "style.css",
+                    # Template parts
+                    "template-parts\*",
+                    # Include directories
+                    "inc\*"
+                )
+                
+                # Define paths to explicitly exclude
+                $excludePaths = @(
+                    # Development files
+                    "node_modules",
+                    ".git",
+                    ".github",
+                    ".vscode",
+                    # Source files that get compiled
+                    "assets\js-src",
+                    "assets\scss",
+                    # Build configuration
+                    "package.json",
+                    "package-lock.json",
+                    "webpack.config.js",
+                    "gulpfile.js",
+                    # Map files
+                    "*.map"
+                )
+                
+                # Copy only the included paths
+                foreach ($path in $includePaths) {
+                    $sourcePath = Join-Path -Path $SourceDir -ChildPath $path
+                    if (Test-Path -Path $sourcePath) {
+                        # Get the parent directory for the target
+                        $targetParent = Split-Path -Path (Join-Path -Path $TargetDir -ChildPath $path)
+                        
+                        # Create parent directory if it doesn't exist
+                        if (-not (Test-Path -Path $targetParent)) {
+                            New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+                        }
+                        
+                        # Copy the files
+                        Copy-Item -Path $sourcePath -Destination (Join-Path -Path $TargetDir -ChildPath (Split-Path -Path $path)) -Recurse -Force
+                    }
+                }
+                
+                Write-Host "WordPress theme files copied selectively to: $TargetDir" -ForegroundColor Green
+            }
+            
+            # Selectively copy only the necessary theme files
+            Copy-WordPressThemeFiles -SourceDir $medicalThemeSourceDir -TargetDir $medicalThemeTargetDir
+            Write-Host "Medical theme copied successfully" -ForegroundColor Green
+        } else {
+            Write-Host "Medical theme repository not found at: $medicalThemeSourceDir" -ForegroundColor Yellow
+            Write-Host "Run backup-and-staging.ps1 with repository updates to download the theme" -ForegroundColor Yellow
+        }
+        
+        # Download and install default WordPress themes directly on the host
+        Write-Host "Downloading default WordPress themes..." -ForegroundColor Green
+        
+        # Define theme URLs - always using the latest versions
+        $themeUrls = @(
+            "https://downloads.wordpress.org/theme/twentytwentyfour.zip",
+            "https://downloads.wordpress.org/theme/astra.zip",
+            "https://downloads.wordpress.org/theme/kadence.zip"
+        )
+        
+        # Create a temporary directory for downloads
+        $tempDir = "$env:TEMP\wp-themes-temp"
+        if (-not (Test-Path -Path $tempDir)) {
+            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        }
+        
+        # Download and extract each theme
+        foreach ($themeUrl in $themeUrls) {
+            $themeName = [System.IO.Path]::GetFileNameWithoutExtension($themeUrl)
+            $zipPath = "$tempDir\$themeName.zip"
+            $extractPath = "$wordpressPath\themes"
+            
+            Write-Host "Downloading $themeName theme..." -ForegroundColor Yellow
+            try {
+                # Download the theme
+                Invoke-WebRequest -Uri $themeUrl -OutFile $zipPath
+                
+                # Extract the theme to the WordPress themes directory
+                Write-Host "Extracting $themeName theme..." -ForegroundColor Yellow
+                Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+                
+                Write-Host "$themeName theme installed successfully" -ForegroundColor Green
+            } catch {
+                Write-Host "Failed to download or extract $themeName theme: $_" -ForegroundColor Red
+            } finally {
+                # Clean up the zip file
+                if (Test-Path -Path $zipPath) {
+                    Remove-Item -Path $zipPath -Force
+                }
+            }
+        }
+        
+        # Clean up the temporary directory
+        if (Test-Path -Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force
+        }
+        
+        Write-Host "Default WordPress themes installed successfully" -ForegroundColor Green
         
         # Return to previous location
         Set-Location -Path $currentLocation
@@ -1650,7 +1964,65 @@ if ($configureNPM -eq "y") {
     if ($uploadSSL -eq "y") {
         # Call selenium-ssl.ps1 to set up SSL certificates and get the certificate ID
         Write-Host "Configuring SSL certificates using Selenium..." -ForegroundColor Cyan
-        $sslOutput = & "$PSScriptRoot\selenium-ssl.ps1" -Environment $Environment -Project $Project -NpmUrl $npmUrl
+        
+        # Check if we're using a non-localhost domain and explicitly pass UseLetsEncrypt
+        if ($DomainBase -ne "localhost") {
+            Write-Host "Non-localhost domain detected: $DomainBase." -ForegroundColor Green
+            
+            # Check if Let's Encrypt certificates already exist
+            $letsEncryptPath = Join-Path $deploymentFolderPath "proxy\letsencrypt"
+            $letsEncryptExists = Test-Path $letsEncryptPath
+            $letsEncryptCertsExist = $false
+            
+            if ($letsEncryptExists) {
+                # Check if there are actual certificate files in the Let's Encrypt directory
+                $certFiles = Get-ChildItem -Path $letsEncryptPath -Recurse -Include "*.pem", "*.crt" -ErrorAction SilentlyContinue
+                $letsEncryptCertsExist = ($certFiles -and $certFiles.Count -gt 0)
+                
+                if ($letsEncryptCertsExist) {
+                    Write-Host "Found existing Let's Encrypt certificates at: $letsEncryptPath" -ForegroundColor Green
+                    Write-Host "Skipping Let's Encrypt certificate creation to avoid rate limits." -ForegroundColor Yellow
+                } else {
+                    Write-Host "Let's Encrypt directory exists but no certificate files found." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No existing Let's Encrypt certificates found." -ForegroundColor Yellow
+            }
+            
+            # Determine whether to use Let's Encrypt based on existing certificates
+            $useLetsEncrypt = -not $letsEncryptCertsExist
+            
+            # For non-localhost domains, we only need to call selenium-ssl.ps1 once
+            # The script will internally create both self-signed and Let's Encrypt certificates if needed
+            if ($useLetsEncrypt) {
+                Write-Host "Creating both self-signed and Let's Encrypt certificates..." -ForegroundColor Cyan
+                $sslOutput = & "$PSScriptRoot\selenium-ssl.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase -NpmUrl $npmUrl -UseLetsEncrypt
+            } else {
+                Write-Host "Creating only self-signed certificates (Let's Encrypt certificates already exist)..." -ForegroundColor Cyan
+                $sslOutput = & "$PSScriptRoot\selenium-ssl.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase -NpmUrl $npmUrl
+            }
+            
+            # Extract certificate ID from the output
+            $certificateId = $null
+            foreach ($line in $sslOutput) {
+                if ($line -match "CERTIFICATE_ID=(\d+)") {
+                    $certificateId = $matches[1]
+                    Write-Host "Found certificate ID: $certificateId" -ForegroundColor Green
+                    break
+                }
+            }
+            
+            # For testing, we'll use the first certificate ID found (self-signed)
+            # instead of the Let's Encrypt certificate
+            if ($certificateId) {
+                Write-Host "Using self-signed certificate ID: $certificateId" -ForegroundColor Green
+                Write-Host "Note: Using self-signed certificate as primary for testing purposes" -ForegroundColor Yellow
+            }
+        } else {
+            # For localhost, just create self-signed certificates
+            Write-Host "Using localhost domain. Creating self-signed certificates only." -ForegroundColor Yellow
+            $sslOutput = & "$PSScriptRoot\selenium-ssl.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase -NpmUrl $npmUrl
+        }
         
         # Extract the certificate ID from the output
         foreach ($line in $sslOutput) {
@@ -1667,10 +2039,10 @@ if ($configureNPM -eq "y") {
     # Configure NPM hosts
     Write-Host "Configuring Nginx Proxy Manager hosts..." -ForegroundColor Cyan
     if ($certificateId) {
-        & "$PSScriptRoot\configure-npm.ps1" -Environment $Environment -Project $Project -NpmUrl $npmUrl -Force -certificate_id $certificateId
+        & "$PSScriptRoot\configure-npm.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase -NpmUrl $npmUrl -Force -certificate_id $certificateId
     } else {
         Write-Host "No certificate ID found, configuring without specific certificate ID" -ForegroundColor Yellow
-        & "$PSScriptRoot\configure-npm.ps1" -Environment $Environment -Project $Project -NpmUrl $npmUrl -Force
+        & "$PSScriptRoot\configure-npm.ps1" -Environment $Environment -Project $Project -DomainBase $DomainBase -NpmUrl $npmUrl -Force
     }
 
 } else {
@@ -2092,6 +2464,18 @@ function Fix-OpenEMRModuleInstallerIssues {
     }
 }
 
+# Update container hosts for localhost domains
+if ($DomainBase -eq "localhost") {
+    Write-Host "Updating container hosts for localhost domains..." -ForegroundColor Cyan
+    try {
+        & "$PSScriptRoot\update-container-hosts.ps1"
+        Write-Host "Container hosts updated successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "Warning: Failed to update container hosts: $_" -ForegroundColor Yellow
+        Write-Host "Continuing with deployment..." -ForegroundColor Yellow
+    }
+}
+
 # Function to create a zip file of the entire deployment
 function Zip-Deployment {
     param (
@@ -2103,7 +2487,9 @@ function Zip-Deployment {
     
     # Create timestamp for zip file name
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $zipFileName = "$ProjectName-$Environment-$timestamp.zip"
+    # Since ProjectName already includes the environment (e.g., "official-staging"),
+    # we don't need to append the environment again
+    $zipFileName = "$ProjectName-$timestamp.zip"
     $zipFilePath = Join-Path $PSScriptRoot $zipFileName
     
     try {
@@ -2154,12 +2540,35 @@ function Zip-Deployment {
                         $stoppedContainers += $container
                     }
                     # Give containers time to release file locks
-                    Start-Sleep -Seconds 2
+                    Write-Host "Waiting for file locks to be released..." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 10
                 } else {
                     Write-Host "Containers will remain running. The zip operation may fail if files are locked." -ForegroundColor Yellow
                 }
             } else {
                 Write-Host "No database or proxy containers found running." -ForegroundColor Green
+            }
+            
+            # Special handling for Let's Encrypt certificate files
+            $letsEncryptPath = Join-Path $deploymentFolderPath "proxy\letsencrypt"
+            if (Test-Path $letsEncryptPath) {
+                Write-Host "Let's Encrypt certificate directory found at: $letsEncryptPath" -ForegroundColor Yellow
+                Write-Host "Ensuring certificate files are accessible..." -ForegroundColor Yellow
+                
+                # Add a small delay to ensure file locks are released
+                Start-Sleep -Seconds 5
+                
+                # Try to temporarily set permissions to ensure access
+                try {
+                    # This is a best-effort attempt and may fail, which is fine
+                    Get-ChildItem -Path $letsEncryptPath -Recurse -ErrorAction SilentlyContinue | 
+                        ForEach-Object { 
+                            try { $_.Attributes = $_.Attributes -band -bnot [System.IO.FileAttributes]::ReadOnly } catch { }
+                        }
+                    Write-Host "Certificate file permissions updated." -ForegroundColor Green
+                } catch {
+                    Write-Host "Warning: Could not update certificate file permissions: $_" -ForegroundColor Yellow
+                }
             }
             
             # Save the list of stopped containers for later restart
@@ -2218,9 +2627,52 @@ function Zip-Deployment {
             Write-Host "Warning: Startup script template not found at $startupScriptSource" -ForegroundColor Yellow
         }
         
-        # Create zip archive with the deployment folder
+        # Create zip archive with the deployment folder, excluding only letsencrypt/live directory
         Write-Host "Creating zip archive with the deployment folder..." -ForegroundColor Green
-        Compress-Archive -Path $fullPathToZip -DestinationPath $zipFilePath -Force
+        
+        # Check if letsencrypt directory exists
+        $letsEncryptPath = Join-Path $fullPathToZip "proxy\letsencrypt"
+        $letsEncryptLivePath = Join-Path $letsEncryptPath "live"
+        
+        if (Test-Path $letsEncryptPath) {
+            if (Test-Path $letsEncryptLivePath) {
+                Write-Host "Excluding Let's Encrypt 'live' directory from zip file to avoid symlink issues..." -ForegroundColor Yellow
+                
+                # Create a new, empty zip file
+                if (Test-Path $zipFilePath) { Remove-Item -Path $zipFilePath -Force }
+                
+                # Get all files recursively, excluding the letsencrypt/live directory
+                $filesToZip = Get-ChildItem -Path $fullPathToZip -Recurse | 
+                             Where-Object { $_.FullName -notlike "$letsEncryptLivePath\*" -and $_.FullName -ne $letsEncryptLivePath -and -not $_.PSIsContainer }
+                
+                # Create the zip file with these files, preserving the directory structure
+                $filesToZip | Compress-Archive -DestinationPath $zipFilePath -Update
+                
+                # Create a README file explaining why letsencrypt/live is excluded
+                $readmePath = Join-Path $env:TEMP "letsencrypt-live-readme.txt"
+                Set-Content -Path $readmePath -Value "Let's Encrypt 'live' directory is not included in this zip file to avoid symlink issues. These files will be regenerated on the target server if needed."
+                
+                # Create the letsencrypt/live directory structure in the zip
+                $liveDirRelativePath = "proxy\letsencrypt\live"
+                $readmeInZipPath = Join-Path $liveDirRelativePath "README.txt"
+                
+                # Add the README to the zip in the letsencrypt/live directory
+                Compress-Archive -Path $readmePath -Update -DestinationPath $zipFilePath -EntryPath $readmeInZipPath
+                
+                # Clean up
+                Remove-Item -Path $readmePath -Force
+                
+                Write-Host "Created zip file with all files except the Let's Encrypt 'live' directory." -ForegroundColor Green
+            } else {
+                # If letsencrypt/live directory doesn't exist, just zip everything
+                Write-Host "No Let's Encrypt 'live' directory found. Including all files in the zip." -ForegroundColor Green
+                Compress-Archive -Path $fullPathToZip -DestinationPath $zipFilePath -Force
+            }
+        } else {
+            # If letsencrypt directory doesn't exist, just zip everything
+            Write-Host "No Let's Encrypt directory found. Including all files in the zip." -ForegroundColor Green
+            Compress-Archive -Path $fullPathToZip -DestinationPath $zipFilePath -Force
+        }
         
         # Get the size of the zip file
         $fileInfo = Get-Item $zipFilePath
@@ -2294,7 +2746,9 @@ if ($Environment -eq "dev") {
 }
 
 # Prompt for creating a deployment archive
-$createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse "y"
+# Set default response based on domain - default to 'y' for non-localhost domains, 'n' for localhost
+$zipDefaultResponse = if ($DomainBase -ne "localhost") { "y" } else { "n" }
+$createZip = Get-UserInput -Prompt "Would you like to create a zip archive of the deployment? (y/n)" -ValidResponses @("y", "n") -DefaultResponse $zipDefaultResponse
 if ($createZip -eq "y") {
     Write-Host "Creating deployment archive..." -ForegroundColor Yellow
     $zipResult = Zip-Deployment -ProjectName $envConfig.ProjectName -Environment $Environment
@@ -2430,5 +2884,125 @@ if ($oracleDeploy -eq "y") {
         Write-Host "Error running Terraform: $_" -ForegroundColor Red
     } finally {
         Pop-Location
+    }
+}
+
+# Check if we need to deploy to a remote server (non-localhost domain)
+if ($DomainBase -ne "localhost") {
+    Write-Host "\nNon-localhost domain detected: $DomainBase" -ForegroundColor Cyan
+    $remoteDeployPrompt = "Would you like to deploy this environment to a remote server? (y/n)"
+    $remoteDeployResponse = Get-UserInput -Prompt $remoteDeployPrompt -ValidResponses @("y", "n") -DefaultResponse "y"
+    
+    if ($remoteDeployResponse -eq "y") {
+        Write-Host "Preparing for remote deployment..." -ForegroundColor Cyan
+        
+        # Create a deployment zip if it doesn't exist
+        $deploymentZips = Get-ChildItem -Path $PSScriptRoot -Filter "$Project-$Environment-*.zip" | Sort-Object LastWriteTime -Descending
+        
+        if ($deploymentZips.Count -eq 0) {
+            Write-Host "No deployment package found. Creating one now..." -ForegroundColor Yellow
+            Zip-Deployment -ProjectName "$Project-$Environment" -Environment $Environment
+            
+            # Refresh the list of deployment zips
+            $deploymentZips = Get-ChildItem -Path $PSScriptRoot -Filter "$Project-$Environment-*.zip" | Sort-Object LastWriteTime -Descending
+            
+            if ($deploymentZips.Count -eq 0) {
+                Write-Host "Failed to create deployment package. Remote deployment cannot proceed." -ForegroundColor Red
+                return
+            }
+        }
+        
+        # Get remote server details
+        Write-Host "\nRemote Server Configuration:" -ForegroundColor Cyan
+        $defaultRemoteServer = "129.158.220.120"
+        $defaultRemoteUser = "ubuntu"
+        $defaultKeyPath = "E:\Downloads\vr2fit_arm.ppk"
+        
+        $remoteServer = Get-UserInput -Prompt "Remote server IP address" -DefaultResponse $defaultRemoteServer
+        $remoteUser = Get-UserInput -Prompt "Remote server username" -DefaultResponse $defaultRemoteUser
+        $keyPath = Get-UserInput -Prompt "Path to SSH key file" -DefaultResponse $defaultKeyPath
+        
+        # Call deploy-remote.ps1 with the appropriate parameters
+        Write-Host "\nStarting remote deployment..." -ForegroundColor Cyan
+        $deployRemoteScript = Join-Path $PSScriptRoot "deploy-remote.ps1"
+        
+        if (Test-Path $deployRemoteScript) {
+            & $deployRemoteScript -Environment $Environment -Project $Project -DomainBase $DomainBase -RemoteServer $remoteServer -RemoteUser $remoteUser -KeyPath $keyPath
+        } else {
+            Write-Host "Error: deploy-remote.ps1 script not found at $deployRemoteScript" -ForegroundColor Red
+        }
+    }
+}
+
+# Function to check if OpenEMR is ready by testing the API endpoint
+function Test-OpenEMRReady {
+    param (
+        [string]$ContainerName = "official-${Environment}-openemr-1",
+        [int]$TimeoutSeconds = 360,
+        [int]$RetryIntervalSeconds = 10
+    )
+    
+    Write-Host "Waiting for OpenEMR to be fully initialized..." -ForegroundColor Yellow
+    
+    $startTime = Get-Date
+    $endTime = $startTime.AddSeconds($TimeoutSeconds)
+    $ready = $false
+    
+    while ((Get-Date) -lt $endTime -and -not $ready) {
+        try {
+            # Check if container is running
+            $containerStatus = docker ps --filter "name=$ContainerName" --format "{{.Status}}"
+            
+            if (-not $containerStatus) {
+                Write-Host "OpenEMR container is not running yet. Waiting..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $RetryIntervalSeconds
+                continue
+            }
+            
+            # Try to access the OpenEMR API endpoint
+            $response = docker exec $ContainerName curl -s -o /dev/null -w "%{http_code}" http://localhost/openemr/apis/default/product
+            
+            # Consider both 200 and 404 as signals that OpenEMR is running
+            # 404 means the application is responding but the endpoint doesn't exist
+            # which is fine - we just need to know the web server is up
+            if ($response -eq "200" -or $response -eq "404") {
+                Write-Host "OpenEMR is ready! (Status code: $response)" -ForegroundColor Green
+                $ready = $true
+            } else {
+                Write-Host "OpenEMR returned status code: $response. Waiting..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $RetryIntervalSeconds
+            }
+        } catch {
+            Write-Host "Error checking OpenEMR status: $_. Retrying..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $RetryIntervalSeconds
+        }
+    }
+    
+    if (-not $ready) {
+        Write-Host "Timed out waiting for OpenEMR to initialize after $TimeoutSeconds seconds." -ForegroundColor Red
+        return $false
+    }
+    
+    return $true
+}
+
+# Deploy Telehealth Module at the end
+if ($DomainBase -eq "localhost") {  # Only run for local deployments
+    # Wait for OpenEMR to be fully initialized
+    if (Test-OpenEMRReady) {
+        Write-Host "\nDeploying Telehealth Module..." -ForegroundColor Cyan
+        $deployTelehealthScript = Join-Path $PSScriptRoot "deploy-telehealth-module.ps1"
+        
+        if (Test-Path $deployTelehealthScript) {
+            # Run with -Force to perform clean uninstall and installation
+            # Include Project and Environment parameters when calling the script
+            Write-Host "Running: $deployTelehealthScript -Force -Project $Project -Environment $Environment" -ForegroundColor Yellow
+            & $deployTelehealthScript -Force -Project $Project -Environment $Environment
+            Write-Host "Telehealth Module deployment completed." -ForegroundColor Green
+        } else {
+            Write-Host "Error: deploy-telehealth-module.ps1 script not found at $deployTelehealthScript" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "Skipping Telehealth Module deployment because OpenEMR is not ready." -ForegroundColor Yellow
     }
 }

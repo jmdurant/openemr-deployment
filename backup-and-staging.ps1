@@ -168,6 +168,7 @@ if (-not $SkipRepoUpdate) {
         default    { "https://github.com/ciips-ops/openemr-telesalud.git" } # Default to aiotp's fork
     }
     $TelehealthRepoUrl = "https://github.com/ciips-code/ciips-telesalud.git" # Corrected URL
+    $WordPressThemeRepoUrl = "https://github.com/jmdurant/development-medical-theme.git" # Medical theme repository
     # Define branches dynamically based on project
     $OpenEMRBranch = switch ($Project) {
         'official' { "master" } # Official repo uses master
@@ -175,12 +176,14 @@ if (-not $SkipRepoUpdate) {
         default    { "main" }   # Assuming aiotp fork uses main
     }
     $TelehealthBranch = "master" # Corrected: Telehealth repo uses master
+    $WordPressThemeBranch = "master" # WordPress theme repository branch
 
     Write-Host "Using OpenEMR branch: $OpenEMRBranch" -ForegroundColor Cyan
     Write-Host "Using Telehealth branch: $TelehealthBranch" -ForegroundColor Cyan
+    Write-Host "Using WordPress Theme branch: $WordPressThemeBranch" -ForegroundColor Cyan
 
     # Call the update script with correct branch names and environment parameter
-    $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project $Project -Environment $Environment -DomainBase $DomainBase -OpenEMRRepoUrl $OpenEMRRepoUrl -TelehealthRepoUrl $TelehealthRepoUrl -OpenEMRBranch $OpenEMRBranch -TelehealthBranch $TelehealthBranch -Force:$Force
+    $repoResult = . "$PSScriptRoot\update-source-repos.ps1" -Project $Project -Environment $Environment -DomainBase $DomainBase -OpenEMRRepoUrl $OpenEMRRepoUrl -TelehealthRepoUrl $TelehealthRepoUrl -WordPressThemeRepoUrl $WordPressThemeRepoUrl -OpenEMRBranch $OpenEMRBranch -TelehealthBranch $TelehealthBranch -WordPressThemeBranch $WordPressThemeBranch -Force:$Force
     
     # Add debug output to verify environment parameter
     Write-Host "Debug: Called update-source-repos.ps1 with Environment=$Environment" -ForegroundColor Magenta
@@ -524,6 +527,13 @@ function Copy-OpenEMREnvFile {
         [string]$Environment
     )
     
+    # Add debug logging for function parameters and global variables
+    Write-Host "DEBUG: Copy-OpenEMREnvFile called with parameters:" -ForegroundColor Magenta
+    Write-Host "DEBUG: SourceDir=$SourceDir" -ForegroundColor Magenta
+    Write-Host "DEBUG: TargetDir=$TargetDir" -ForegroundColor Magenta
+    Write-Host "DEBUG: Environment=$Environment" -ForegroundColor Magenta
+    Write-Host "DEBUG: Global Project=$Project" -ForegroundColor Magenta
+    
     # Determine the appropriate .env.example location based on project type
     $envExamplePath = if ($Project -eq "official") {
         # For official OpenEMR, look in the root directory
@@ -533,6 +543,12 @@ function Copy-OpenEMREnvFile {
         "$SourceDir\ciips\docker\.env.example"
     }
     $envTargetPath = "$TargetDir\.env"
+    
+    # Debug the actual paths being used
+    Write-Host "DEBUG: Project type detected: $($Project -eq "official" ? "official" : "custom")" -ForegroundColor Magenta
+    Write-Host "DEBUG: Full path to .env.example being checked: $envExamplePath" -ForegroundColor Magenta
+    Write-Host "DEBUG: Target .env path: $envTargetPath" -ForegroundColor Magenta
+    Write-Host "DEBUG: File exists check: $(Test-Path $envExamplePath)" -ForegroundColor Magenta
     
     Write-Host "Looking for OpenEMR .env.example file at: $envExamplePath" -ForegroundColor Yellow
     
@@ -573,6 +589,27 @@ function Copy-OpenEMREnvFile {
                 $envContent = $envContent -replace "PROXY_NETWORK=.*", "PROXY_NETWORK=proxy-$Environment"
             }
             
+            # Add Telehealth API token if not present
+            if (-not ($envContent -match "TELEHEALTH_API_TOKEN=")) {
+                $envContent += "`nTELEHEALTH_API_TOKEN=\${TELEHEALTH_API_TOKEN}`n"
+            } else {
+                $envContent = $envContent -replace "TELEHEALTH_API_TOKEN=.*", "TELEHEALTH_API_TOKEN=\${TELEHEALTH_API_TOKEN}"
+            }
+            
+            # Add Telehealth external URL if not present
+            if (-not ($envContent -match "TELEHEALTH_EXTERNAL_URL=")) {
+                $envContent += "`nTELEHEALTH_EXTERNAL_URL=http://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.web)`n"
+            } else {
+                $envContent = $envContent -replace "TELEHEALTH_EXTERNAL_URL=.*", "TELEHEALTH_EXTERNAL_URL=http://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.web)"
+            }
+            # Add Telehealth external HTTPS URL if not present
+            if (-not ($envContent -match "TELEHEALTH_EXTERNAL_HTTPS_URL=")) {
+                $envContent += "`nTELEHEALTH_EXTERNAL_HTTPS_URL=https://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.https)`n"
+            } else {
+                $envContent = $envContent -replace "TELEHEALTH_EXTERNAL_HTTPS_URL=.*", "TELEHEALTH_EXTERNAL_HTTPS_URL=https://$($envConfig.Domains.telehealth):$($envConfig.Config.containerPorts.telehealth.https)"
+            }
+
+
             # Add domain setting if not present
             if (-not ($envContent -match "DOMAIN=")) {
                 $envContent += "`nDOMAIN=$($envConfig.Domains.openemr)`n"
@@ -711,7 +748,8 @@ function Copy-TelehealthEnvFile {
             $envContent = $envContent -replace "DB_DATABASE=.*", "DB_DATABASE=telehealth"
             $envContent = $envContent -replace "DB_USERNAME=.*", "DB_USERNAME=telehealth"
             $envContent = $envContent -replace "DB_PASSWORD=.*", "DB_PASSWORD=telehealth_password"
-            $envContent = $envContent -replace "NOTIFICATION_URL=.*", "NOTIFICATION_URL=https://openemr-telehealth.free.beeceptor.com/notifications"
+            $envContent = $envContent -replace "NOTIFICATION_URL=.*", "NOTIFICATION_URL=http://$Project-$Environment-openemr-1:$($envConfig.Config.containerPorts.npm.http)/interface/modules/custom_modules/oe-telehealth-module/api/notifications_simple.php"
+            $envContent = $envContent -replace "NOTIFICATION_TOKEN=.*", "NOTIFICATION_TOKEN=openemr-telehealth-secret-2024"
             $envContent = $envContent -replace "LANGUAGE=.*", "LANGUAGE=en"
             $envContent = $envContent -replace "TIMEZONE=.*", "TIMEZONE=America/New_York"
 
@@ -841,6 +879,11 @@ function Copy-JitsiEnvFile {
             # Enable authentication
             $envContent = $envContent -replace "#ENABLE_AUTH=1", "ENABLE_AUTH=1"
             $envContent = $envContent -replace "#AUTH_TYPE=jwt", "AUTH_TYPE=jwt"
+            $envContent = $envContent -replace "JWT_APP_ID=.*", "JWT_APP_ID=telehealth"
+            $envContent = $envContent -replace "JWT_APP_SECRET=.*", "JWT_APP_SECRET=OafDjrVt8r"
+
+            # get latest jitsi image
+            #$envContent = $envContent -replace "#JITSI_IMAGE_VERSION=latest", "JITSI_IMAGE_VERSION=latest"
             
             # Add network configuration
             if (-not ($envContent -match "FRONTEND_NETWORK=")) {
@@ -1425,6 +1468,53 @@ function Copy-OpenEMRFolder {
                     $dockerComposeContent = $dockerComposeContent -replace "version: '3.1'", "version: '3.1'`nname: $($envConfig.ProjectName)"
                 }
 
+                # Add Telehealth variables to the environment section for the openemr service
+                # First, parse the YAML content into lines for safer manipulation
+                $lines = $dockerComposeContent -split "`n"
+                
+                # Find the openemr service environment section
+                $openemrServiceIndex = -1
+                $environmentIndex = -1
+                
+                for ($i = 0; $i -lt $lines.Count; $i++) {
+                    if ($lines[$i] -match "^\s+openemr:") {
+                        $openemrServiceIndex = $i
+                    }
+                    if ($openemrServiceIndex -ne -1 -and $lines[$i] -match "^\s+environment:") {
+                        $environmentIndex = $i
+                        break
+                    }
+                }
+                
+                # If we found the environment section, add our variables after the last environment variable
+                if ($environmentIndex -ne -1) {
+                    $lastEnvVarIndex = $environmentIndex
+                    $indentation = ""
+                    
+                    # Find the last environment variable and its indentation
+                    for ($i = $environmentIndex + 1; $i -lt $lines.Count; $i++) {
+                        if ($lines[$i] -match "^(\s+)\S+:" -and $lines[$i-1] -match "^\s+\S+: \S+") {
+                            # This line has different indentation, so we've moved past the environment section
+                            break
+                        }
+                        if ($lines[$i] -match "^(\s+)(\S+): \S+") {
+                            $lastEnvVarIndex = $i
+                            $indentation = $matches[1]
+                        }
+                    }
+                    
+                    # Add our Telehealth variables after the last environment variable with the same indentation
+                    $teleHealthVars = @(
+                        "${indentation}TELEHEALTH_EXTERNAL_URL: `${TELEHEALTH_EXTERNAL_URL}",
+                        "${indentation}TELEHEALTH_EXTERNAL_HTTPS_URL: `${TELEHEALTH_EXTERNAL_HTTPS_URL}",
+                        "${indentation}TELEHEALTH_API_TOKEN: `${TELEHEALTH_API_TOKEN}",
+                        "${indentation}NOTIFICATION_TOKEN: `${NOTIFICATION_TOKEN}"
+                    )
+                    
+                    $lines = $lines[0..$lastEnvVarIndex] + $teleHealthVars + $lines[($lastEnvVarIndex+1)..($lines.Count-1)]
+                    $dockerComposeContent = $lines -join "`n"
+                }
+                
                 # Save the updated content
                 Set-Content -Path "$TargetDir\docker-compose.yml" -Value $dockerComposeContent
                 Write-Host "Updated official OpenEMR docker-compose file with environment variables" -ForegroundColor Green
